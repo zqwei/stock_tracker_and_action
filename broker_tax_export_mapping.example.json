@@ -1,0 +1,92 @@
+{
+  "version": 1,
+  "mapping_kind": "broker_tax_export",
+  "name": "Example Broker Realized Gain/Loss Export",
+  "broker": "ExampleBroker",
+  "notes": "Edit column names to match your broker CSV. This mapping is used for year-end reconciliation.",
+  "output_schema": {
+    "canonical_row_version": 1,
+    "fields": [
+      "description",
+      "symbol",
+      "date_acquired",
+      "date_sold",
+      "proceeds",
+      "cost_basis",
+      "wash_sale_disallowed",
+      "gain_loss",
+      "term"
+    ]
+  },
+  "parsers": {
+    "date": {
+      "formats": [
+        "%m/%d/%Y",
+        "%Y-%m-%d"
+      ]
+    },
+    "money": {
+      "currency": "USD",
+      "allow_parentheses_for_negative": true,
+      "allow_commas": true
+    }
+  },
+  "columns": {
+    "Description": {
+      "field": "description",
+      "type": "string",
+      "required": true
+    },
+    "Symbol": {
+      "field": "symbol",
+      "type": "string",
+      "required": false
+    },
+    "Date Acquired": {
+      "field": "date_acquired",
+      "type": "date",
+      "required": false
+    },
+    "Date Sold": {
+      "field": "date_sold",
+      "type": "date",
+      "required": true
+    },
+    "Proceeds": {
+      "field": "proceeds",
+      "type": "money",
+      "required": true
+    },
+    "Cost Basis": {
+      "field": "cost_basis",
+      "type": "money",
+      "required": true
+    },
+    "Wash Sale Disallowed": {
+      "field": "wash_sale_disallowed",
+      "type": "money",
+      "required": false
+    },
+    "Gain/Loss": {
+      "field": "gain_loss",
+      "type": "money",
+      "required": true
+    },
+    "Term": {
+      "field": "term",
+      "type": "term",
+      "required": false,
+      "transform": "normalize_term"
+    }
+  },
+  "postprocess": {
+    "normalize_term_map": {
+      "Short": "ST",
+      "Long": "LT",
+      "Short-Term": "ST",
+      "Long-Term": "LT",
+      "ST": "ST",
+      "LT": "LT"
+    }
+  }
+}

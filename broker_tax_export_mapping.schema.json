@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/schemas/broker_tax_export_mapping.schema.json",
+  "title": "Broker Tax Export Mapping",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "mapping_kind",
+    "name",
+    "broker",
+    "output_schema",
+    "columns"
+  ],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Mapping file format version."
+    },
+    "mapping_kind": {
+      "type": "string",
+      "const": "broker_tax_export",
+      "description": "Identifies this mapping as a broker realized gain/loss export mapping."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Human-friendly mapping name."
+    },
+    "broker": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Broker name, e.g., Webull/Fidelity/Schwab."
+    },
+    "notes": {
+      "type": "string",
+      "description": "Optional freeform notes."
+    },
+    "output_schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canonical_row_version",
+        "fields"
+      ],
+      "properties": {
+        "canonical_row_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "fields": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          },
+          "description": "List of canonical fields the importer will produce."
+        }
+      }
+    },
+    "parsers": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "date": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "formats": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "strftime-like formats; try in order."
+            },
+            "timezone": {
+              "type": "string",
+              "description": "Optional timezone, e.g., America/New_York."
+            }
+          }
+        },
+        "money": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "currency": {
+              "type": "string",
+              "default": "USD"
+            },
+            "allow_parentheses_for_negative": {
+              "type": "boolean",
+              "default": true
+            },
+            "allow_commas": {
+              "type": "boolean",
+              "default": true
+            }
+          }
+        }
+      }
+    },
+    "columns": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": false,
+      "description": "Map input CSV column name -> mapping config.",
+      "patternProperties": {
+        "^.+$": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "field",
+            "type"
+          ],
+          "properties": {
+            "field": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Canonical output field name."
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "string",
+                "date",
+                "money",
+                "number",
+                "term",
+                "code"
+              ],
+              "description": "Parser type for this column."
+            },
+            "required": {
+              "type": "boolean",
+              "default": false
+            },
+            "transform": {
+              "type": "string",
+              "description": "Optional transform name to apply after parsing (e.g., normalize_term)."
+            }
+          }
+        }
+      }
+    },
+    "postprocess": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Optional post-processing rules (implementation-defined)."
+    }
+  }
+}
