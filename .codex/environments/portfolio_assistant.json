@@ -1,1 +1,16 @@
-{}
+{
+  "name": "portfolio_assistant",
+  "setup": [
+    "ENV_NAME=\"portfolio_assistant\"; if conda env list | awk '{print $1}' | grep -qx \"$ENV_NAME\"; then conda env update -n \"$ENV_NAME\" -f environment.yml --prune; else conda env create -n \"$ENV_NAME\" -f environment.yml; fi"
+  ],
+  "actions": [
+    {
+      "name": "Run Streamlit",
+      "command": "conda run -n portfolio_assistant streamlit run src/portfolio_assistant/ui/streamlit/app.py"
+    },
+    {
+      "name": "Run tests",
+      "command": "conda run -n portfolio_assistant pytest -q"
+    }
+  ]
+}

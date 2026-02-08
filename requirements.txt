@@ -1,0 +1,8 @@
+pandas
+numpy
+pydantic
+sqlalchemy>=2.0
+streamlit
+python-dateutil
+requests
+openai>=1.0.0
