@@ -14,3 +14,5 @@ dependencies:
   - requests
   - pip:
       - openai>=1.0.0
+      - openai-agents
+      - python-dotenv
