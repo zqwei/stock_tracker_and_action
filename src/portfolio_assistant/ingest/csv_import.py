@@ -7,12 +7,15 @@ from typing import BinaryIO
 import pandas as pd
 
 from portfolio_assistant.ingest.csv_mapping import (
+    CASH_CANONICAL_FIELDS,
     CASH_REQUIRED_FIELDS,
+    TRADE_CANONICAL_FIELDS,
     TRADE_REQUIRED_FIELDS,
     file_signature,
     infer_cash_column_map,
     infer_column_map,
     missing_required_fields,
+    validate_mapping,
 )
 from portfolio_assistant.ingest.validators import (
     compute_signed_trade_cash,
@@ -64,8 +67,23 @@ def load_trade_csv_preview(
     )
 
 
-def apply_mapping(df: pd.DataFrame, mapping: dict[str, str]) -> pd.DataFrame:
-    reverse_mapping = {source: target for target, source in mapping.items()}
+def apply_mapping(
+    df: pd.DataFrame,
+    mapping: dict[str, str],
+    *,
+    canonical_fields: list[str] | None = None,
+    required_fields: list[str] | None = None,
+) -> pd.DataFrame:
+    cleaned_mapping, errors = validate_mapping(
+        mapping,
+        columns=[str(c) for c in df.columns],
+        canonical_fields=canonical_fields,
+        required_fields=required_fields,
+    )
+    if errors:
+        raise ValueError("; ".join(errors))
+
+    reverse_mapping = {source: target for target, source in cleaned_mapping.items()}
     selected_columns = [col for col in reverse_mapping if col in df.columns]
     out = df[selected_columns].rename(columns=reverse_mapping)
     return out
@@ -96,7 +114,21 @@ def normalize_trade_records(
     normalized_rows: list[dict] = []
     issues: list[str] = []
 
-    renamed = apply_mapping(df, mapping).fillna("")
+    cleaned_mapping, mapping_errors = validate_mapping(
+        mapping,
+        columns=[str(c) for c in df.columns],
+        canonical_fields=TRADE_CANONICAL_FIELDS,
+        required_fields=TRADE_REQUIRED_FIELDS,
+    )
+    if mapping_errors:
+        return [], [f"Mapping error: {error}" for error in mapping_errors]
+
+    renamed = apply_mapping(
+        df,
+        cleaned_mapping,
+        canonical_fields=TRADE_CANONICAL_FIELDS,
+        required_fields=TRADE_REQUIRED_FIELDS,
+    ).fillna("")
     for idx, row in renamed.iterrows():
         row_data = row.to_dict()
         executed_at = parse_datetime(row_data.get("executed_at"))
@@ -110,7 +142,8 @@ def normalize_trade_records(
         quantity = abs(quantity)
         price = parse_float(row_data.get("price"), default=0.0) or 0.0
         fees = parse_float(row_data.get("fees"), default=0.0) or 0.0
-        multiplier = int(parse_float(row_data.get("multiplier"), default=100.0) or 100)
+        multiplier_raw = parse_float(row_data.get("multiplier"), default=100.0)
+        multiplier = int(multiplier_raw or 100)
 
         symbol = str(row_data.get("symbol", "")).strip().upper() or None
         parsed_option = parse_option_symbol(option_symbol_raw)
@@ -134,17 +167,34 @@ def normalize_trade_records(
                 multiplier=multiplier if instrument_type == "OPTION" else 1,
             )
 
+        if instrument_type == "STOCK" and side in {"BTO", "BTC"}:
+            side = "BUY"
+        elif instrument_type == "STOCK" and side in {"STO", "STC"}:
+            side = "SELL"
+
         if executed_at is None:
             issues.append(f"Row {idx + 1}: invalid executed_at")
             continue
         if not side:
             issues.append(f"Row {idx + 1}: missing side")
             continue
+        if instrument_type == "STOCK" and side not in {"BUY", "SELL"}:
+            issues.append(f"Row {idx + 1}: invalid stock side '{side}'")
+            continue
+        if instrument_type == "OPTION" and side not in {"BUY", "SELL", "BTO", "STO", "BTC", "STC"}:
+            issues.append(f"Row {idx + 1}: invalid option side '{side}'")
+            continue
         if quantity <= 0:
             issues.append(f"Row {idx + 1}: quantity must be > 0")
             continue
         if price < 0:
             issues.append(f"Row {idx + 1}: price cannot be negative")
+            continue
+        if instrument_type == "OPTION" and multiplier <= 0:
+            issues.append(f"Row {idx + 1}: option multiplier must be > 0")
+            continue
+        if not symbol and not underlying:
+            issues.append(f"Row {idx + 1}: symbol/underlying missing")
             continue
 
         normalized_rows.append(
@@ -179,7 +229,21 @@ def normalize_cash_records(
     rows: list[dict] = []
     issues: list[str] = []
 
-    renamed = apply_mapping(df, mapping).fillna("")
+    cleaned_mapping, mapping_errors = validate_mapping(
+        mapping,
+        columns=[str(c) for c in df.columns],
+        canonical_fields=CASH_CANONICAL_FIELDS,
+        required_fields=CASH_REQUIRED_FIELDS,
+    )
+    if mapping_errors:
+        return [], [f"Mapping error: {error}" for error in mapping_errors]
+
+    renamed = apply_mapping(
+        df,
+        cleaned_mapping,
+        canonical_fields=CASH_CANONICAL_FIELDS,
+        required_fields=CASH_REQUIRED_FIELDS,
+    ).fillna("")
     for idx, row in renamed.iterrows():
         row_data = row.to_dict()
         posted_at = parse_datetime(row_data.get("posted_at"))
@@ -196,6 +260,9 @@ def normalize_cash_records(
 
         if posted_at is None:
             issues.append(f"Cash row {idx + 1}: invalid posted_at")
+            continue
+        if amount <= 0:
+            issues.append(f"Cash row {idx + 1}: amount must be > 0")
             continue
 
         rows.append(
