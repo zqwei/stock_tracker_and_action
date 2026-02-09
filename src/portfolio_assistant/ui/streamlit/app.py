@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -530,7 +530,10 @@ def _render_import_trades(
             st.error(f"Could not save mapping: {exc}")
             return
 
-        source_file = f"{uploaded_file.name}:{datetime.utcnow().isoformat(timespec='seconds')}"
+        source_file = (
+            f"{uploaded_file.name}:"
+            f"{datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec='seconds')}"
+        )
         mapping_name = f"{broker}:{preview.signature}"
         raw_rows = df.fillna("").to_dict(orient="records")
 

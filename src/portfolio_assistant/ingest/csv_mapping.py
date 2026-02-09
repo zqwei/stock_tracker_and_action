@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -300,7 +300,7 @@ def save_trade_mapping(
         "signature": signature_text,
         "columns": clean_columns,
         "mapping": cleaned_mapping,
-        "updated_at": datetime.utcnow().isoformat(timespec="seconds"),
+        "updated_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds"),
     }
     _write_json_atomic(path, store)
 

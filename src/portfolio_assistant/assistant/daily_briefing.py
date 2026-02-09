@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -222,7 +222,7 @@ def generate_daily_briefing(
     as_of: datetime | None = None,
     client: OpenAI | None = None,
 ) -> DailyBriefingResult:
-    generated_at = as_of or datetime.utcnow()
+    generated_at = as_of or datetime.now(timezone.utc).replace(tzinfo=None)
 
     with Session(engine) as session:
         snapshot = _portfolio_snapshot(session, account_id=account_id)

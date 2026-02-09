@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
-from datetime import datetime
+from datetime import datetime, timezone
 import re
 from typing import Any
 
@@ -379,7 +379,7 @@ def recompute_pnl(session: Session, account_id: str | None = None) -> dict[str, 
         unmatched_close_quantity += qty
 
     open_rows = 0
-    as_of = datetime.utcnow()
+    as_of = datetime.now(timezone.utc).replace(tzinfo=None)
 
     all_stock_keys = set(stock_long_lots) | set(stock_short_lots)
     for acc_id, symbol in sorted(all_stock_keys):

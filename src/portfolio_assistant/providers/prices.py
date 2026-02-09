@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -23,7 +23,7 @@ class PriceProvider:
     def upsert_quote(
         self, session: Session, symbol: str, close: float, as_of: datetime | None = None
     ) -> PriceCache:
-        as_of = as_of or datetime.utcnow()
+        as_of = as_of or datetime.now(timezone.utc).replace(tzinfo=None)
         row = PriceCache(symbol=symbol.upper(), close=close, as_of=as_of, interval="1d")
         session.add(row)
         session.flush()
