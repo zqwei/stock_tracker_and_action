@@ -18,6 +18,7 @@ class Settings:
     app_env: str
     database_url: str
     openai_model: str
+    enable_ask_gpt: bool
     enable_web_mode: bool
     enable_daily_briefing: bool
 
@@ -28,6 +29,7 @@ def get_settings() -> Settings:
         app_env=os.getenv("APP_ENV", "development"),
         database_url=os.getenv("DATABASE_URL", db_default),
         openai_model=os.getenv("OPENAI_MODEL", "gpt-5-mini"),
+        enable_ask_gpt=_env_bool("ENABLE_ASK_GPT", False),
         enable_web_mode=_env_bool("ENABLE_WEB_MODE", False),
-        enable_daily_briefing=_env_bool("ENABLE_DAILY_BRIEFING", True),
+        enable_daily_briefing=_env_bool("ENABLE_DAILY_BRIEFING", False),
     )

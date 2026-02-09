@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from datetime import date, datetime
 from pathlib import Path
@@ -23,6 +24,12 @@ from portfolio_assistant.analytics.reconciliation import (
     realized_by_symbol,
 )
 from portfolio_assistant.analytics.wash_sale import detect_wash_sale_risks
+from portfolio_assistant.assistant.ask_gpt import ask_portfolio_question
+from portfolio_assistant.assistant.daily_briefing import (
+    generate_daily_briefing,
+    list_briefing_artifacts,
+    load_briefing_artifact,
+)
 from portfolio_assistant.assistant.tools_db import (
     create_account,
     get_engine,
@@ -31,6 +38,7 @@ from portfolio_assistant.assistant.tools_db import (
     list_accounts,
 )
 from portfolio_assistant.config.paths import ensure_data_dirs
+from portfolio_assistant.config.settings import get_settings
 from portfolio_assistant.db.migrate import migrate
 from portfolio_assistant.db.models import (
     Account,
@@ -62,7 +70,7 @@ except Exception:  # pragma: no cover - fallback path
     alt = None
 
 
-NAV_ITEMS = [
+CORE_NAV_ITEMS = [
     "Accounts",
     "Import Trades",
     "Import Cash",
@@ -71,6 +79,16 @@ NAV_ITEMS = [
     "Wash Sale Risk",
     "Data Quality",
 ]
+
+
+def _nav_items() -> list[str]:
+    settings = get_settings()
+    items = list(CORE_NAV_ITEMS)
+    if settings.enable_ask_gpt:
+        items.append("Ask GPT")
+    if settings.enable_daily_briefing:
+        items.append("Daily Briefings")
+    return items
 
 
 @st.cache_resource
@@ -107,9 +125,11 @@ def _set_nav_page(page: str) -> None:
     st.rerun()
 
 
-def _render_sidebar(accounts: list[Account]) -> tuple[str, str | None]:
-    if "nav_item" not in st.session_state:
-        st.session_state["nav_item"] = NAV_ITEMS[0]
+def _render_sidebar(accounts: list[Account], nav_items: list[str]) -> tuple[str, str | None]:
+    if "nav_item" not in st.session_state or st.session_state.get("nav_item") not in set(
+        nav_items
+    ):
+        st.session_state["nav_item"] = nav_items[0]
 
     account_by_id = _account_lookup(accounts)
     account_options: list[str | None] = [None] + [account.id for account in accounts]
@@ -120,7 +140,7 @@ def _render_sidebar(accounts: list[Account]) -> tuple[str, str | None]:
 
     with st.sidebar:
         st.title("Portfolio Assistant")
-        nav = st.radio("Navigate", NAV_ITEMS, key="nav_item")
+        nav = st.radio("Navigate", nav_items, key="nav_item")
 
         account_filter_id = st.selectbox(
             "Global account filter",
@@ -137,19 +157,24 @@ def _render_sidebar(accounts: list[Account]) -> tuple[str, str | None]:
     return nav, account_filter_id
 
 
-def _render_flow_header(nav: str, accounts: list[Account], account_filter_id: str | None) -> None:
-    idx = NAV_ITEMS.index(nav)
-    progress = float(idx + 1) / float(len(NAV_ITEMS))
+def _render_flow_header(
+    nav: str,
+    nav_items: list[str],
+    accounts: list[Account],
+    account_filter_id: str | None,
+) -> None:
+    idx = nav_items.index(nav)
+    progress = float(idx + 1) / float(len(nav_items))
     st.progress(progress)
 
     if account_filter_id is None:
-        st.caption(f"Workflow step {idx + 1}/{len(NAV_ITEMS)}. Account scope: all accounts.")
+        st.caption(f"Workflow step {idx + 1}/{len(nav_items)}. Account scope: all accounts.")
     else:
         account = _account_lookup(accounts).get(account_filter_id)
         if account is not None:
             st.caption(
                 "Workflow step "
-                f"{idx + 1}/{len(NAV_ITEMS)}. "
+                f"{idx + 1}/{len(nav_items)}. "
                 f"Account scope: {_account_label(account)}."
             )
 
@@ -160,14 +185,14 @@ def _render_flow_header(nav: str, accounts: list[Account], account_filter_id: st
         disabled=idx == 0,
         use_container_width=True,
     ):
-        _set_nav_page(NAV_ITEMS[idx - 1])
+        _set_nav_page(nav_items[idx - 1])
     if col_next.button(
         "Next",
         key="nav_next_btn",
-        disabled=idx >= len(NAV_ITEMS) - 1,
+        disabled=idx >= len(nav_items) - 1,
         use_container_width=True,
     ):
-        _set_nav_page(NAV_ITEMS[idx + 1])
+        _set_nav_page(nav_items[idx + 1])
 
 
 def _select_account(
@@ -1099,13 +1124,184 @@ def _render_data_quality(engine, account_filter_id: str | None) -> None:
     c4.metric("Options with missing parsed fields", option_missing)
 
 
+def _openai_key_configured() -> bool:
+    return bool(str(os.getenv("OPENAI_API_KEY", "")).strip())
+
+
+def _render_ask_gpt(engine, account_filter_id: str | None) -> None:
+    settings = get_settings()
+    st.header("Ask GPT")
+    st.caption("Read-only portfolio analysis with strict local guardrails.")
+    st.info(
+        "Guardrails: no credentials storage, no auto-trading, educational only (not financial/tax advice)."
+    )
+
+    if not _openai_key_configured():
+        st.warning("Set `OPENAI_API_KEY` in your local `.env` to enable Ask GPT.")
+        return
+
+    web_enabled = False
+    if settings.enable_web_mode:
+        web_enabled = st.toggle(
+            "Enable web context (optional)",
+            value=False,
+            help="Adds web search context for current events and returns source citations when available.",
+        )
+    else:
+        st.caption("Web mode is disabled. Set `ENABLE_WEB_MODE=true` to allow optional web context.")
+
+    with st.form("ask_gpt_form"):
+        question = st.text_area(
+            "Question",
+            placeholder=(
+                "Example: Summarize my top realized and unrealized risk drivers in this account scope."
+            ),
+            height=120,
+        )
+        submitted = st.form_submit_button("Ask GPT", type="primary")
+
+    if submitted:
+        if not question.strip():
+            st.error("Please enter a question.")
+        else:
+            with st.spinner("Querying GPT with read-only tools..."):
+                try:
+                    result = ask_portfolio_question(
+                        engine=engine,
+                        question=question.strip(),
+                        model=settings.openai_model,
+                        account_scope_id=account_filter_id,
+                        web_enabled=web_enabled,
+                    )
+                    st.session_state["ask_gpt_last_result"] = result
+                except Exception as exc:
+                    st.error(f"Ask GPT failed: {exc}")
+                    return
+
+    result = st.session_state.get("ask_gpt_last_result")
+    if result is None:
+        return
+
+    st.subheader("Answer")
+    st.markdown(result.answer)
+    st.caption(f"Model: `{result.model}` | Web mode: {'on' if result.web_enabled else 'off'}")
+
+    with st.expander("Tool Calls", expanded=False):
+        if result.tool_events:
+            st.dataframe(pd.DataFrame(result.tool_events), use_container_width=True, hide_index=True)
+        else:
+            st.caption("No function tool calls were made.")
+
+    with st.expander("Sources", expanded=True):
+        if result.sources:
+            for source in result.sources:
+                title = source.get("title") or source.get("url") or "source"
+                url = str(source.get("url") or "").strip()
+                if url:
+                    st.markdown(f"- [{title}]({url})")
+                else:
+                    st.markdown(f"- {title}")
+        else:
+            st.caption("No web citations returned.")
+
+
+def _render_daily_briefings(engine, account_filter_id: str | None) -> None:
+    settings = get_settings()
+    st.header("Daily Briefings")
+    st.caption("Deterministic risk checks with optional GPT narrative layer.")
+    st.info(
+        "Pipeline scaffold only. No credential collection and no trade execution. Educational use only."
+    )
+
+    can_use_gpt = _openai_key_configured()
+    include_gpt = st.checkbox(
+        "Add GPT narrative summary",
+        value=False,
+        disabled=not can_use_gpt,
+    )
+    if not can_use_gpt:
+        st.caption("Set `OPENAI_API_KEY` to enable GPT narrative summaries.")
+
+    include_web = False
+    if include_gpt and settings.enable_web_mode:
+        include_web = st.checkbox(
+            "Allow optional web context + citations",
+            value=False,
+        )
+
+    if st.button("Generate briefing now", type="primary"):
+        with st.spinner("Generating briefing..."):
+            try:
+                result = generate_daily_briefing(
+                    engine,
+                    model=settings.openai_model,
+                    account_id=account_filter_id,
+                    include_gpt_summary=include_gpt,
+                    enable_web_context=include_web,
+                )
+                st.session_state["daily_briefing_last_result"] = result
+            except Exception as exc:
+                st.error(f"Briefing generation failed: {exc}")
+                return
+
+    result = st.session_state.get("daily_briefing_last_result")
+    if result is not None:
+        payload = result.payload
+        snapshot = payload.get("snapshot") or {}
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total P&L", _money(float(snapshot.get("total_pnl", 0.0) or 0.0)))
+        c2.metric("Realized", _money(float(snapshot.get("realized_total", 0.0) or 0.0)))
+        c3.metric("Unrealized", _money(float(snapshot.get("unrealized_total", 0.0) or 0.0)))
+        c4.metric("Open positions", int(snapshot.get("open_positions", 0) or 0))
+
+        checks = payload.get("risk_checks") or []
+        st.subheader("Deterministic Risk Checks")
+        if checks:
+            st.dataframe(pd.DataFrame(checks), use_container_width=True, hide_index=True)
+        else:
+            st.success("No deterministic risk checks triggered.")
+
+        actions = payload.get("protective_actions") or []
+        st.subheader("Protective Actions")
+        for action in actions:
+            st.markdown(f"- {action}")
+
+        if result.gpt_summary:
+            st.subheader("GPT Narrative")
+            st.markdown(result.gpt_summary)
+
+            sources = result.gpt_sources or []
+            if sources:
+                st.markdown("**GPT Sources**")
+                for source in sources:
+                    title = source.get("title") or source.get("url") or "source"
+                    url = str(source.get("url") or "").strip()
+                    if url:
+                        st.markdown(f"- [{title}]({url})")
+                    else:
+                        st.markdown(f"- {title}")
+        elif payload.get("gpt_error"):
+            st.warning(f"GPT summary skipped: {payload['gpt_error']}")
+
+        st.caption(f"Saved artifact: `{result.artifact_path}`")
+
+    recent_files = list_briefing_artifacts(limit=5)
+    if recent_files:
+        with st.expander("Recent Briefing Artifacts", expanded=False):
+            options = {path.name: path for path in recent_files}
+            selected_name = st.selectbox("Open artifact", list(options.keys()))
+            selected_payload = load_briefing_artifact(options[selected_name])
+            st.json(selected_payload)
+
+
 def main() -> None:
     st.set_page_config(page_title="Portfolio Assistant", layout="wide")
     engine = _initialize_app_engine()
     accounts = _load_accounts(engine)
+    nav_items = _nav_items()
 
-    nav, account_filter_id = _render_sidebar(accounts)
-    _render_flow_header(nav, accounts, account_filter_id)
+    nav, account_filter_id = _render_sidebar(accounts, nav_items)
+    _render_flow_header(nav, nav_items, accounts, account_filter_id)
 
     if nav == "Accounts":
         _render_accounts(engine, accounts)
@@ -1119,8 +1315,12 @@ def main() -> None:
         _render_calendar(engine, account_filter_id)
     elif nav == "Wash Sale Risk":
         _render_wash_sale(engine, account_filter_id)
-    else:
+    elif nav == "Data Quality":
         _render_data_quality(engine, account_filter_id)
+    elif nav == "Ask GPT":
+        _render_ask_gpt(engine, account_filter_id)
+    elif nav == "Daily Briefings":
+        _render_daily_briefings(engine, account_filter_id)
 
 
 if __name__ == "__main__":
