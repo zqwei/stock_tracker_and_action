@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 from datetime import datetime
+import re
 from typing import Any
 
 from sqlalchemy import delete, select
@@ -9,6 +10,19 @@ from sqlalchemy.orm import Session
 
 from portfolio_assistant.analytics.lots import LOT_EPSILON, Lot, consume_fifo_with_remainder
 from portfolio_assistant.db.models import PnlRealized, PositionOpen, PriceCache, TradeNormalized
+
+OPTION_OCC_RE = re.compile(r"^([A-Z]{1,6})(\d{2})(\d{2})(\d{2})([CP])(\d{8})$")
+OPTION_SIMPLE_RE = re.compile(
+    r"^([A-Z.\-]{1,10})\s+(\d{4}-\d{2}-\d{2})\s+(\d+(?:\.\d+)?)\s*([CP])$"
+)
+SIDE_ALIASES = {
+    "B": "BUY",
+    "S": "SELL",
+    "BUY TO OPEN": "BTO",
+    "SELL TO OPEN": "STO",
+    "BUY TO CLOSE": "BTC",
+    "SELL TO CLOSE": "STC",
+}
 
 
 def _enum_value(value: Any) -> str:
@@ -28,17 +42,66 @@ def _format_strike(value: float | None) -> str:
     return f"{strike:.8f}".rstrip("0").rstrip(".")
 
 
+def _parse_option_symbol_raw(raw: str | None) -> tuple[str, str, str, str] | None:
+    if not raw:
+        return None
+
+    canonical = " ".join(str(raw).upper().split())
+    m_occ = OPTION_OCC_RE.match(canonical)
+    if m_occ:
+        underlying, yy, mm, dd, cp, strike_raw = m_occ.groups()
+        strike = int(strike_raw) / 1000.0
+        return underlying, f"20{yy}-{mm}-{dd}", _format_strike(strike), cp
+
+    m_simple = OPTION_SIMPLE_RE.match(canonical)
+    if m_simple:
+        underlying, exp, strike_text, cp = m_simple.groups()
+        return underlying, exp, _format_strike(float(strike_text)), cp
+
+    return None
+
+
+def _normalize_trade_side(instrument: str, side: str) -> str:
+    normalized = SIDE_ALIASES.get(side, side)
+    if instrument == "STOCK" and normalized in {"BTO", "BTC"}:
+        return "BUY"
+    if instrument == "STOCK" and normalized in {"STO", "STC"}:
+        return "SELL"
+    return normalized
+
+
 def _option_key(trade: TradeNormalized) -> tuple[str, str]:
     symbol = _normalize_symbol(trade.underlying or trade.symbol)
     exp = trade.expiration.strftime("%Y-%m-%d") if trade.expiration else None
     cp = _enum_value(trade.call_put).upper() if trade.call_put is not None else None
     strike = _format_strike(trade.strike)
+    raw_canonical = (
+        " ".join(str(trade.option_symbol_raw).upper().split())
+        if trade.option_symbol_raw
+        else None
+    )
+    raw_parts = _parse_option_symbol_raw(raw_canonical)
+    if raw_parts is not None:
+        raw_symbol, raw_exp, raw_strike, raw_cp = raw_parts
+        raw_structured = f"{raw_symbol}|{raw_exp}|{raw_strike}|{raw_cp}"
+    else:
+        raw_structured = None
 
-    if exp and cp:
+    if exp and cp and trade.strike is not None:
         return symbol, f"{symbol}|{exp}|{strike}|{cp}"
-    if trade.option_symbol_raw:
-        canonical = " ".join(str(trade.option_symbol_raw).upper().split())
-        return symbol, canonical
+
+    if exp and cp and raw_structured:
+        expected_prefix = f"{symbol}|{exp}|"
+        if raw_structured.startswith(expected_prefix):
+            return symbol, raw_structured
+
+    if raw_structured:
+        resolved_symbol = symbol or raw_parts[0]
+        return resolved_symbol, raw_structured
+
+    if raw_canonical:
+        return symbol, raw_canonical
+
     return symbol, f"{symbol}|UNKNOWN|{strike}|{cp or '?'}"
 
 
@@ -110,23 +173,13 @@ def recompute_pnl(session: Session, account_id: str | None = None) -> dict[str, 
         if qty <= 0:
             continue
 
-        side = _enum_value(trade.side).upper()
         price = float(trade.price or 0.0)
         fees = float(trade.fees or 0.0)
         mult = int(trade.multiplier or 100)
         if mult <= 0:
             mult = 100
         instrument = _enum_value(trade.instrument_type).upper()
-
-        if instrument == "STOCK" and side in {"BTO", "BTC", "BUY TO OPEN", "BUY TO CLOSE"}:
-            side = "BUY"
-        elif instrument == "STOCK" and side in {
-            "STO",
-            "STC",
-            "SELL TO OPEN",
-            "SELL TO CLOSE",
-        }:
-            side = "SELL"
+        side = _normalize_trade_side(instrument, _enum_value(trade.side).upper())
 
         symbol = _normalize_symbol(trade.symbol or trade.underlying)
         if not symbol:

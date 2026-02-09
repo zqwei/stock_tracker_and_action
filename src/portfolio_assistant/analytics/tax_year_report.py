@@ -141,6 +141,14 @@ def generate_tax_year_report(
             (total_raw_gain_loss + total_wash_irs) - total_adjusted_gain_loss
         )
         <= 1e-6,
+        "math_check_wash_broker": abs(
+            total_wash_broker - float(broker_wash["total_disallowed_loss"])
+        )
+        <= 1e-6,
+        "math_check_wash_irs": abs(
+            total_wash_irs - float(irs_wash["total_disallowed_loss"])
+        )
+        <= 1e-6,
     }
 
     return {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+import re
 from typing import Any, Literal
 
 from sqlalchemy import func, or_, select
@@ -10,6 +11,10 @@ from portfolio_assistant.db.models import Account, PnlRealized, TradeNormalized
 
 EPSILON = 1e-12
 IRA_ACCOUNT_TYPES = {"TRAD_IRA", "ROTH_IRA"}
+OPTION_CLOSE_NOTES_RE = re.compile(
+    r"^(?P<contract>.+?)\s+(?:LONG|SHORT)\s+CLOSE\s+FROM\s+\d{4}-\d{2}-\d{2}$",
+    re.IGNORECASE,
+)
 
 
 def _enum_value(value: Any) -> str:
@@ -18,6 +23,55 @@ def _enum_value(value: Any) -> str:
 
 def _normalize_symbol(value: str | None) -> str:
     return (value or "").strip().upper()
+
+
+def _format_strike(value: float | None) -> str:
+    if value is None:
+        return "UNKNOWN"
+    strike = float(value)
+    if strike.is_integer():
+        return str(int(strike))
+    return f"{strike:.8f}".rstrip("0").rstrip(".")
+
+
+def _option_contract_key_from_trade(trade: TradeNormalized) -> str | None:
+    symbol = _normalize_symbol(trade.underlying or trade.symbol)
+    exp = trade.expiration.strftime("%Y-%m-%d") if trade.expiration else None
+    cp = _enum_value(trade.call_put).upper() if trade.call_put is not None else None
+    strike = _format_strike(trade.strike)
+    if exp and cp and trade.strike is not None:
+        return f"{symbol}|{exp}|{strike}|{cp}"
+    if trade.option_symbol_raw:
+        return " ".join(str(trade.option_symbol_raw).upper().split())
+    if exp and cp:
+        return f"{symbol}|{exp}|{strike}|{cp}"
+    return None
+
+
+def _option_contract_key_from_sale(sale: PnlRealized) -> str | None:
+    if _enum_value(sale.instrument_type).upper() != "OPTION":
+        return None
+    notes = str(sale.notes or "").strip()
+    if not notes:
+        return None
+    match = OPTION_CLOSE_NOTES_RE.match(notes)
+    if not match:
+        return None
+    return " ".join(match.group("contract").upper().split())
+
+
+def _is_call_option_trade(trade: TradeNormalized) -> bool:
+    if _enum_value(trade.instrument_type).upper() != "OPTION":
+        return False
+
+    cp = _enum_value(trade.call_put).upper() if trade.call_put is not None else ""
+    if cp == "C":
+        return True
+    if cp == "P":
+        return False
+
+    contract = _option_contract_key_from_trade(trade) or ""
+    return contract.endswith("|C") or contract.endswith(" C")
 
 
 def _sale_share_equivalent(sale: PnlRealized) -> float:
@@ -41,12 +95,30 @@ def _is_replacement_acquisition(trade: TradeNormalized) -> bool:
     side = _enum_value(trade.side).upper()
     instrument = _enum_value(trade.instrument_type).upper()
 
-    if side == "BTO":
-        return True
     if instrument == "STOCK" and side == "BUY":
         return True
-    if instrument == "OPTION" and side == "BUY":
-        return True
+    if instrument == "OPTION" and side in {"BTO", "BUY"}:
+        return _is_call_option_trade(trade)
+    return False
+
+
+def _is_same_security_broker_mode(sale: PnlRealized, trade: TradeNormalized) -> bool:
+    sale_instrument = _enum_value(sale.instrument_type).upper()
+    trade_instrument = _enum_value(trade.instrument_type).upper()
+    if sale_instrument != trade_instrument:
+        return False
+
+    sale_symbol = _normalize_symbol(sale.symbol)
+    if sale_instrument == "STOCK":
+        return _normalize_symbol(trade.symbol) == sale_symbol
+
+    if sale_instrument == "OPTION":
+        sale_contract = _option_contract_key_from_sale(sale)
+        trade_contract = _option_contract_key_from_trade(trade)
+        if sale_contract and trade_contract:
+            return sale_contract == trade_contract
+        return _normalize_symbol(trade.underlying or trade.symbol) == sale_symbol
+
     return False
 
 
@@ -74,12 +146,12 @@ def _loss_sales(
 def _candidate_replacements(
     session: Session,
     *,
-    sale_symbol: str,
-    sale_account_id: str,
+    sale: PnlRealized,
     start_dt: datetime,
     end_dt: datetime,
     mode: Literal["broker", "irs"],
 ) -> list[TradeNormalized]:
+    sale_symbol = _normalize_symbol(sale.symbol)
     stmt = (
         select(TradeNormalized)
         .where(
@@ -94,11 +166,16 @@ def _candidate_replacements(
         .order_by(TradeNormalized.executed_at.asc(), TradeNormalized.id.asc())
     )
     if mode == "broker":
-        stmt = stmt.where(TradeNormalized.account_id == sale_account_id)
+        stmt = stmt.where(TradeNormalized.account_id == sale.account_id)
 
-    return [
-        trade for trade in session.scalars(stmt).all() if _is_replacement_acquisition(trade)
-    ]
+    out: list[TradeNormalized] = []
+    for trade in session.scalars(stmt).all():
+        if not _is_replacement_acquisition(trade):
+            continue
+        if mode == "broker" and not _is_same_security_broker_mode(sale, trade):
+            continue
+        out.append(trade)
+    return out
 
 
 def estimate_wash_sale_disallowance(
@@ -145,8 +222,7 @@ def estimate_wash_sale_disallowance(
         matches: list[dict[str, Any]] = []
         for trade in _candidate_replacements(
             session,
-            sale_symbol=sale_symbol,
-            sale_account_id=sale.account_id,
+            sale=sale,
             start_dt=start_dt,
             end_dt=end_dt,
             mode=mode,
@@ -218,6 +294,7 @@ def estimate_wash_sale_disallowance(
                     if sale_account is not None
                     else ""
                 ),
+                "sale_instrument_type": _enum_value(sale.instrument_type).upper(),
                 "symbol": sale_symbol,
                 "sale_date": sale.close_date.isoformat(),
                 "sale_loss": float(sale.pnl),
