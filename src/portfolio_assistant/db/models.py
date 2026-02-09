@@ -12,6 +12,7 @@ from sqlalchemy import (
     Enum as SqlEnum,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -62,6 +63,7 @@ class Account(Base):
     __tablename__ = "accounts"
     __table_args__ = (
         UniqueConstraint("broker", "account_label", name="uq_accounts_broker_label"),
+        Index("ix_accounts_type_broker", "account_type", "broker"),
     )
 
     id: Mapped[str] = mapped_column(
@@ -81,6 +83,9 @@ class TradeRaw(Base):
         UniqueConstraint(
             "account_id", "source_file", "row_index", name="uq_trades_raw_row"
         ),
+        Index("ix_trades_raw_account_signature", "account_id", "file_signature"),
+        Index("ix_trades_raw_account_imported_at", "account_id", "imported_at"),
+        Index("ix_trades_raw_account_row_hash", "account_id", "row_hash"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -91,6 +96,7 @@ class TradeRaw(Base):
     source_file: Mapped[str] = mapped_column(String(256), nullable=False)
     file_signature: Mapped[str | None] = mapped_column(String(128), nullable=True)
     row_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    row_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     raw_payload: Mapped[dict] = mapped_column(JSON, nullable=False)
     mapping_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     imported_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
@@ -98,6 +104,15 @@ class TradeRaw(Base):
 
 class TradeNormalized(Base):
     __tablename__ = "trades_normalized"
+    __table_args__ = (
+        Index("ix_trades_norm_account_exec_id", "account_id", "executed_at", "id"),
+        Index("ix_trades_norm_symbol_side_exec", "symbol", "side", "executed_at"),
+        Index(
+            "ix_trades_norm_underlying_side_exec", "underlying", "side", "executed_at"
+        ),
+        Index("ix_trades_norm_account_symbol_exec", "account_id", "symbol", "executed_at"),
+        Index("ix_trades_norm_account_dedupe", "account_id", "dedupe_key"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     account_id: Mapped[str] = mapped_column(
@@ -126,11 +141,21 @@ class TradeNormalized(Base):
     fees: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     net_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
     currency: Mapped[str] = mapped_column(String(8), nullable=False, default="USD")
+    dedupe_key: Mapped[str | None] = mapped_column(String(96), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
 
 
 class CashActivity(Base):
     __tablename__ = "cash_activity"
+    __table_args__ = (
+        Index(
+            "ix_cash_activity_account_external_posted",
+            "account_id",
+            "is_external",
+            "posted_at",
+        ),
+        Index("ix_cash_activity_account_dedupe", "account_id", "dedupe_key"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     account_id: Mapped[str] = mapped_column(
@@ -146,6 +171,7 @@ class CashActivity(Base):
     source: Mapped[str | None] = mapped_column(String(64), nullable=True)
     is_external: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     transfer_group_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    dedupe_key: Mapped[str | None] = mapped_column(String(96), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
 
 
@@ -166,6 +192,16 @@ class PriceCache(Base):
 
 class PnlRealized(Base):
     __tablename__ = "pnl_realized"
+    __table_args__ = (
+        Index("ix_pnl_realized_account_close", "account_id", "close_date"),
+        Index("ix_pnl_realized_symbol_close", "symbol", "close_date"),
+        Index(
+            "ix_pnl_realized_account_symbol_inst",
+            "account_id",
+            "symbol",
+            "instrument_type",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     account_id: Mapped[str] = mapped_column(
@@ -193,6 +229,13 @@ class PositionOpen(Base):
             "symbol",
             "option_symbol_raw",
             name="uq_positions_open_key",
+        ),
+        Index("ix_positions_open_account_asof", "account_id", "as_of"),
+        Index(
+            "ix_positions_open_account_symbol_inst",
+            "account_id",
+            "symbol",
+            "instrument_type",
         ),
     )
 

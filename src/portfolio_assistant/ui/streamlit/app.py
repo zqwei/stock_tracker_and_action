@@ -205,12 +205,16 @@ def _render_import_trades(engine, accounts: list[Account]) -> None:
             st.error("No valid normalized rows to import.")
             return
 
-        save_trade_mapping(
-            broker=broker,
-            signature=preview.signature,
-            columns=preview.columns,
-            mapping=current_mapping,
-        )
+        try:
+            save_trade_mapping(
+                broker=broker,
+                signature=preview.signature,
+                columns=preview.columns,
+                mapping=current_mapping,
+            )
+        except ValueError as exc:
+            st.error(f"Could not save mapping: {exc}")
+            return
 
         source_file = f"{uploaded_file.name}:{datetime.utcnow().isoformat(timespec='seconds')}"
         mapping_name = f"{broker}:{preview.signature}"
