@@ -223,3 +223,129 @@ def test_recompute_pnl_reports_unmatched_explicit_option_closes():
         assert isclose(float(stats["unmatched_close_quantity"]), 1.0, rel_tol=0.0, abs_tol=1e-9)
         realized_rows = list(session.scalars(select(PnlRealized)).all())
         assert len(realized_rows) == 0
+
+
+def test_recompute_pnl_handles_partial_option_closes_with_mixed_contract_fields():
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        account = Account(broker="B1", account_label="Taxable", account_type="TAXABLE")
+        session.add(account)
+        session.flush()
+
+        session.add_all(
+            [
+                TradeNormalized(
+                    account_id=account.id,
+                    broker="B1",
+                    executed_at=datetime(2025, 3, 1, 10, 0, 0),
+                    instrument_type="OPTION",
+                    symbol="NVDA",
+                    underlying="NVDA",
+                    expiration=datetime(2025, 6, 20),
+                    strike=None,
+                    call_put="C",
+                    option_symbol_raw="NVDA 2025-06-20 1000 C",
+                    side="BTO",
+                    quantity=2,
+                    price=5.0,
+                    fees=2.0,
+                    net_amount=-1002.0,
+                    multiplier=100,
+                    currency="USD",
+                ),
+                TradeNormalized(
+                    account_id=account.id,
+                    broker="B1",
+                    executed_at=datetime(2025, 3, 5, 10, 0, 0),
+                    instrument_type="OPTION",
+                    symbol="NVDA",
+                    underlying="NVDA",
+                    expiration=datetime(2025, 6, 20),
+                    strike=1000.0,
+                    call_put="C",
+                    option_symbol_raw="nvda 2025-06-20 1000 c",
+                    side="STC",
+                    quantity=1,
+                    price=7.0,
+                    fees=1.0,
+                    net_amount=699.0,
+                    multiplier=100,
+                    currency="USD",
+                ),
+                TradeNormalized(
+                    account_id=account.id,
+                    broker="B1",
+                    executed_at=datetime(2025, 3, 6, 10, 0, 0),
+                    instrument_type="OPTION",
+                    symbol="NVDA",
+                    underlying="NVDA",
+                    expiration=datetime(2025, 6, 20),
+                    strike=1000.0,
+                    call_put="C",
+                    option_symbol_raw="NVDA 2025-06-20 1000 C",
+                    side="STO",
+                    quantity=1,
+                    price=6.0,
+                    fees=1.0,
+                    net_amount=599.0,
+                    multiplier=100,
+                    currency="USD",
+                ),
+                TradeNormalized(
+                    account_id=account.id,
+                    broker="B1",
+                    executed_at=datetime(2025, 3, 7, 10, 0, 0),
+                    instrument_type="OPTION",
+                    symbol="NVDA",
+                    underlying="NVDA",
+                    expiration=datetime(2025, 6, 20),
+                    strike=1000.0,
+                    call_put="C",
+                    option_symbol_raw="NVDA 2025-06-20 1000 C",
+                    side="BTC",
+                    quantity=1,
+                    price=4.0,
+                    fees=1.0,
+                    net_amount=-401.0,
+                    multiplier=100,
+                    currency="USD",
+                ),
+            ]
+        )
+        session.flush()
+
+        stats = recompute_pnl(session)
+        session.commit()
+
+        assert stats["realized_rows"] == 2
+        assert isclose(float(stats["unmatched_close_quantity"]), 0.0, rel_tol=0.0, abs_tol=1e-9)
+
+        realized_rows = list(
+            session.scalars(
+                select(PnlRealized).where(
+                    PnlRealized.account_id == account.id,
+                    PnlRealized.symbol == "NVDA",
+                    PnlRealized.instrument_type == "OPTION",
+                )
+            ).all()
+        )
+        assert len(realized_rows) == 2
+        total_option_pnl = sum(float(row.pnl) for row in realized_rows)
+        assert isclose(total_option_pnl, 396.0, rel_tol=0.0, abs_tol=1e-9)
+        notes = [str(row.notes or "") for row in realized_rows]
+        assert any("long close from" in note for note in notes)
+        assert any("short close from" in note for note in notes)
+
+        open_positions = list(
+            session.scalars(
+                select(PositionOpen).where(
+                    PositionOpen.account_id == account.id,
+                    PositionOpen.symbol == "NVDA",
+                    PositionOpen.instrument_type == "OPTION",
+                )
+            ).all()
+        )
+        assert len(open_positions) == 1
+        assert isclose(float(open_positions[0].quantity), 1.0, rel_tol=0.0, abs_tol=1e-9)

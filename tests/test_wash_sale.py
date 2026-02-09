@@ -280,3 +280,151 @@ def test_wash_sale_allocation_does_not_double_count_same_replacement_buy():
             rel_tol=0.0,
             abs_tol=1e-9,
         )
+
+
+def test_wash_sale_ignores_put_option_buys_as_replacements():
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        taxable = Account(broker="B1", account_label="Taxable", account_type="TAXABLE")
+        roth = Account(broker="B1", account_label="Roth", account_type="ROTH_IRA")
+        session.add_all([taxable, roth])
+        session.flush()
+
+        session.add_all(
+            [
+                TradeNormalized(
+                    account_id=taxable.id,
+                    broker="B1",
+                    executed_at=datetime(2024, 11, 10, 10, 0, 0),
+                    instrument_type="STOCK",
+                    symbol="AAPL",
+                    side="BUY",
+                    quantity=10,
+                    price=100.0,
+                    fees=0.0,
+                    net_amount=-1000.0,
+                    multiplier=1,
+                    currency="USD",
+                ),
+                TradeNormalized(
+                    account_id=taxable.id,
+                    broker="B1",
+                    executed_at=datetime(2025, 1, 10, 10, 0, 0),
+                    instrument_type="STOCK",
+                    symbol="AAPL",
+                    side="SELL",
+                    quantity=10,
+                    price=90.0,
+                    fees=0.0,
+                    net_amount=900.0,
+                    multiplier=1,
+                    currency="USD",
+                ),
+                TradeNormalized(
+                    account_id=roth.id,
+                    broker="B1",
+                    executed_at=datetime(2025, 1, 15, 10, 0, 0),
+                    instrument_type="OPTION",
+                    symbol="AAPL",
+                    underlying="AAPL",
+                    expiration=datetime(2025, 3, 21),
+                    strike=80.0,
+                    call_put="P",
+                    option_symbol_raw="AAPL 2025-03-21 80 P",
+                    side="BTO",
+                    quantity=1,
+                    price=1.0,
+                    fees=0.0,
+                    net_amount=-100.0,
+                    multiplier=100,
+                    currency="USD",
+                ),
+            ]
+        )
+        session.flush()
+
+        recompute_pnl(session)
+        session.commit()
+
+        analysis = estimate_wash_sale_disallowance(session, mode="irs")
+        assert isclose(float(analysis["total_disallowed_loss"]), 0.0, rel_tol=0.0, abs_tol=1e-9)
+        assert analysis["sales"] == []
+        assert detect_wash_sale_risks(session) == []
+
+
+def test_wash_sale_broker_mode_excludes_option_replacements_for_stock_losses():
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        taxable = Account(broker="B1", account_label="Taxable", account_type="TAXABLE")
+        session.add(taxable)
+        session.flush()
+
+        session.add_all(
+            [
+                TradeNormalized(
+                    account_id=taxable.id,
+                    broker="B1",
+                    executed_at=datetime(2024, 11, 10, 10, 0, 0),
+                    instrument_type="STOCK",
+                    symbol="AAPL",
+                    side="BUY",
+                    quantity=10,
+                    price=100.0,
+                    fees=0.0,
+                    net_amount=-1000.0,
+                    multiplier=1,
+                    currency="USD",
+                ),
+                TradeNormalized(
+                    account_id=taxable.id,
+                    broker="B1",
+                    executed_at=datetime(2025, 1, 10, 10, 0, 0),
+                    instrument_type="STOCK",
+                    symbol="AAPL",
+                    side="SELL",
+                    quantity=10,
+                    price=90.0,
+                    fees=0.0,
+                    net_amount=900.0,
+                    multiplier=1,
+                    currency="USD",
+                ),
+                TradeNormalized(
+                    account_id=taxable.id,
+                    broker="B1",
+                    executed_at=datetime(2025, 1, 15, 10, 0, 0),
+                    instrument_type="OPTION",
+                    symbol="AAPL",
+                    underlying="AAPL",
+                    expiration=datetime(2025, 3, 21),
+                    strike=100.0,
+                    call_put="C",
+                    option_symbol_raw="AAPL 2025-03-21 100 C",
+                    side="BTO",
+                    quantity=1,
+                    price=2.0,
+                    fees=0.0,
+                    net_amount=-200.0,
+                    multiplier=100,
+                    currency="USD",
+                ),
+            ]
+        )
+        session.flush()
+
+        recompute_pnl(session)
+        session.commit()
+
+        broker = estimate_wash_sale_disallowance(session, mode="broker")
+        irs = estimate_wash_sale_disallowance(session, mode="irs")
+
+        assert isclose(float(broker["total_disallowed_loss"]), 0.0, rel_tol=0.0, abs_tol=1e-9)
+        assert isclose(float(irs["total_disallowed_loss"]), 100.0, rel_tol=0.0, abs_tol=1e-9)
+
+        risks = detect_wash_sale_risks(session)
+        assert len(risks) == 1
+        assert risks[0]["buy_instrument_type"] == "OPTION"

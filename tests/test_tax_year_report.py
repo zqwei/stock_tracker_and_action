@@ -293,3 +293,60 @@ def test_tax_year_report_applies_january_replacements_to_december_loss_sales():
             abs_tol=1e-9,
         )
         assert isclose(float(summary["total_gain_or_loss"]), 0.0, rel_tol=0.0, abs_tol=1e-9)
+
+
+def test_tax_report_totals_handles_zero_raw_gain_and_basis_fallback():
+    detail_rows = [
+        {
+            "proceeds": 100.0,
+            "cost_basis": 100.0,
+            "gain_or_loss": 50.0,
+            "raw_gain_or_loss": 0.0,
+            "wash_sale_disallowed": 50.0,
+            "wash_sale_disallowed_broker": 0.0,
+            "wash_sale_disallowed_irs": 50.0,
+            "term": "SHORT",
+        },
+        {
+            "proceeds": 200.0,
+            "basis": 150.0,
+            "cost_basis": None,
+            "gain_or_loss": 50.0,
+            "raw_gain_or_loss": 50.0,
+            "wash_sale_disallowed": 0.0,
+            "wash_sale_disallowed_broker": 0.0,
+            "wash_sale_disallowed_irs": 0.0,
+            "term": "LONG",
+        },
+    ]
+
+    totals = tax_report_totals(detail_rows)
+    assert isclose(float(totals["total_proceeds"]), 300.0, rel_tol=0.0, abs_tol=1e-9)
+    assert isclose(float(totals["total_cost_basis"]), 250.0, rel_tol=0.0, abs_tol=1e-9)
+    assert isclose(float(totals["total_gain_or_loss_raw"]), 50.0, rel_tol=0.0, abs_tol=1e-9)
+    assert isclose(float(totals["total_gain_or_loss"]), 100.0, rel_tol=0.0, abs_tol=1e-9)
+    assert isclose(
+        float(totals["total_wash_sale_disallowed_broker"]),
+        0.0,
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    )
+    assert isclose(
+        float(totals["total_wash_sale_disallowed_irs"]),
+        50.0,
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    )
+    assert isclose(float(totals["wash_sale_mode_difference"]), 50.0, rel_tol=0.0, abs_tol=1e-9)
+
+    report = {
+        "summary": {
+            **totals,
+            "rows": len(detail_rows),
+            "math_check_raw": True,
+            "math_check_adjusted": True,
+        },
+        "detail_rows": detail_rows,
+    }
+    validation = validate_tax_report_summary(report)
+    assert validation["ok"], validation
