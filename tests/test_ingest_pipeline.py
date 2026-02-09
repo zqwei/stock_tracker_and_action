@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 
 import pandas as pd
@@ -118,6 +119,84 @@ def test_save_trade_mapping_validates_and_roundtrips(tmp_path, monkeypatch):
     assert loaded == valid_mapping
 
 
+def test_save_trade_mapping_requires_required_fields(tmp_path, monkeypatch):
+    mapping_path = tmp_path / "mappings" / "trade_column_mappings.json"
+    monkeypatch.setattr(
+        "portfolio_assistant.ingest.csv_mapping._mapping_store_path",
+        lambda: mapping_path,
+    )
+
+    columns = ["Date", "Side", "Qty", "Price"]
+    missing_required = {
+        "executed_at": "Date",
+        "side": "Side",
+        "quantity": "Qty",
+        "price": "Price",
+    }
+    with pytest.raises(ValueError) as exc_info:
+        save_trade_mapping(
+            broker="webull",
+            signature="sig-missing",
+            columns=columns,
+            mapping=missing_required,
+        )
+    assert "Missing required field mapping" in str(exc_info.value)
+
+
+def test_save_trade_mapping_normalizes_column_name_matching(tmp_path, monkeypatch):
+    mapping_path = tmp_path / "mappings" / "trade_column_mappings.json"
+    monkeypatch.setattr(
+        "portfolio_assistant.ingest.csv_mapping._mapping_store_path",
+        lambda: mapping_path,
+    )
+
+    columns = [" Trade Date ", "Type", "SIDE", "Qty", "Price"]
+    mapping = {
+        "executed_at": "trade_date",
+        "instrument_type": "type",
+        "side": "side",
+        "quantity": "QTY",
+        "price": " price ",
+    }
+    save_trade_mapping(
+        broker="webull",
+        signature="sig-normalized",
+        columns=columns,
+        mapping=mapping,
+    )
+
+    loaded = get_saved_trade_mapping("webull", "sig-normalized")
+    assert loaded == {
+        "executed_at": " Trade Date ",
+        "instrument_type": "Type",
+        "side": "SIDE",
+        "quantity": "Qty",
+        "price": "Price",
+    }
+
+
+def test_get_saved_trade_mapping_ignores_invalid_store_record(tmp_path, monkeypatch):
+    mapping_path = tmp_path / "mappings" / "trade_column_mappings.json"
+    mapping_path.parent.mkdir(parents=True, exist_ok=True)
+    mapping_path.write_text(
+        json.dumps(
+            {
+                "webull::sig-bad": {
+                    "columns": "not-a-list",
+                    "mapping": {"executed_at": "Date"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "portfolio_assistant.ingest.csv_mapping._mapping_store_path",
+        lambda: mapping_path,
+    )
+
+    assert get_saved_trade_mapping("webull", "sig-bad") is None
+
+
 def test_insert_trade_import_dedupes_reimports():
     engine = create_engine("sqlite:///:memory:", future=True)
     Base.metadata.create_all(engine)
@@ -228,4 +307,70 @@ def test_insert_cash_activity_dedupes_reimports():
 
         assert first == 1
         assert second == 0
+        assert session.scalar(select(func.count()).select_from(CashActivity)) == 1
+
+
+def test_insert_trade_import_dedupes_duplicate_rows_within_same_batch():
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        account = _setup_account(session)
+        raw_row = {"Date": "2025-01-02", "Type": "STOCK", "Side": "BUY", "Qty": "1", "Price": "10"}
+        normalized_row = {
+            "account_id": account.id,
+            "broker": "B1",
+            "trade_id": "T-1",
+            "executed_at": datetime(2025, 1, 2, 10, 0, 0),
+            "instrument_type": "STOCK",
+            "symbol": "AAPL",
+            "side": "BUY",
+            "option_symbol_raw": None,
+            "underlying": None,
+            "expiration": None,
+            "strike": None,
+            "call_put": None,
+            "multiplier": 1,
+            "quantity": 1.0,
+            "price": 10.0,
+            "fees": 0.0,
+            "net_amount": -10.0,
+            "currency": "USD",
+        }
+
+        inserted = insert_trade_import(
+            session=session,
+            account_id=account.id,
+            broker="B1",
+            source_file="file-a.csv",
+            file_sig="sig-a",
+            mapping_name="m1",
+            raw_rows=[raw_row, raw_row],
+            normalized_rows=[normalized_row, normalized_row],
+        )
+
+        assert inserted == (1, 1)
+        assert session.scalar(select(func.count()).select_from(TradeRaw)) == 1
+        assert session.scalar(select(func.count()).select_from(TradeNormalized)) == 1
+
+
+def test_insert_cash_activity_dedupes_duplicate_rows_within_same_batch():
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        account = _setup_account(session)
+        row = {
+            "account_id": account.id,
+            "broker": "B1",
+            "posted_at": datetime(2025, 1, 5, 12, 0, 0),
+            "activity_type": "DEPOSIT",
+            "amount": 100.0,
+            "description": "ACH deposit",
+            "source": "ACH",
+            "is_external": True,
+        }
+
+        inserted = insert_cash_activity(session, [row, row])
+        assert inserted == 1
         assert session.scalar(select(func.count()).select_from(CashActivity)) == 1

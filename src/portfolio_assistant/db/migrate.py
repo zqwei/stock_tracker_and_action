@@ -28,19 +28,31 @@ SQLITE_EXTRA_INDEXES = [
     "CREATE INDEX IF NOT EXISTS ix_accounts_type_broker ON accounts (account_type, broker)",
     "CREATE INDEX IF NOT EXISTS ix_trades_raw_account_signature ON trades_raw (account_id, file_signature)",
     "CREATE INDEX IF NOT EXISTS ix_trades_raw_account_imported_at ON trades_raw (account_id, imported_at)",
-    "CREATE INDEX IF NOT EXISTS ix_trades_raw_account_row_hash ON trades_raw (account_id, row_hash)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_trades_raw_account_row_hash ON trades_raw (account_id, row_hash)",
     "CREATE INDEX IF NOT EXISTS ix_trades_norm_account_exec_id ON trades_normalized (account_id, executed_at, id)",
+    "CREATE INDEX IF NOT EXISTS ix_trades_norm_exec_id ON trades_normalized (executed_at, id)",
     "CREATE INDEX IF NOT EXISTS ix_trades_norm_symbol_side_exec ON trades_normalized (symbol, side, executed_at)",
     "CREATE INDEX IF NOT EXISTS ix_trades_norm_underlying_side_exec ON trades_normalized (underlying, side, executed_at)",
+    "CREATE INDEX IF NOT EXISTS ix_trades_norm_upper_symbol_exec ON trades_normalized (upper(symbol), executed_at, id)",
+    "CREATE INDEX IF NOT EXISTS ix_trades_norm_upper_underlying_exec ON trades_normalized (upper(underlying), executed_at, id)",
     "CREATE INDEX IF NOT EXISTS ix_trades_norm_account_symbol_exec ON trades_normalized (account_id, symbol, executed_at)",
-    "CREATE INDEX IF NOT EXISTS ix_trades_norm_account_dedupe ON trades_normalized (account_id, dedupe_key)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_trades_norm_account_dedupe ON trades_normalized (account_id, dedupe_key)",
     "CREATE INDEX IF NOT EXISTS ix_cash_activity_account_external_posted ON cash_activity (account_id, is_external, posted_at)",
-    "CREATE INDEX IF NOT EXISTS ix_cash_activity_account_dedupe ON cash_activity (account_id, dedupe_key)",
+    "CREATE INDEX IF NOT EXISTS ix_cash_activity_account_posted ON cash_activity (account_id, posted_at)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_cash_activity_account_dedupe ON cash_activity (account_id, dedupe_key)",
     "CREATE INDEX IF NOT EXISTS ix_pnl_realized_account_close ON pnl_realized (account_id, close_date)",
+    "CREATE INDEX IF NOT EXISTS ix_pnl_realized_account_close_id ON pnl_realized (account_id, close_date, id)",
     "CREATE INDEX IF NOT EXISTS ix_pnl_realized_symbol_close ON pnl_realized (symbol, close_date)",
     "CREATE INDEX IF NOT EXISTS ix_pnl_realized_account_symbol_inst ON pnl_realized (account_id, symbol, instrument_type)",
     "CREATE INDEX IF NOT EXISTS ix_positions_open_account_asof ON positions_open (account_id, as_of)",
+    "CREATE INDEX IF NOT EXISTS ix_positions_open_account_asof_id ON positions_open (account_id, as_of, id)",
     "CREATE INDEX IF NOT EXISTS ix_positions_open_account_symbol_inst ON positions_open (account_id, symbol, instrument_type)",
+]
+
+SQLITE_REDUNDANT_INDEXES = [
+    "DROP INDEX IF EXISTS ix_trades_raw_account_row_hash",
+    "DROP INDEX IF EXISTS ix_trades_norm_account_dedupe",
+    "DROP INDEX IF EXISTS ix_cash_activity_account_dedupe",
 ]
 
 
@@ -85,6 +97,14 @@ def _ensure_sqlite_indexes(engine: Engine) -> None:
         return
     with engine.begin() as conn:
         for statement in SQLITE_EXTRA_INDEXES:
+            conn.execute(text(statement))
+
+
+def _drop_sqlite_redundant_indexes(engine: Engine) -> None:
+    if engine.dialect.name != "sqlite":
+        return
+    with engine.begin() as conn:
+        for statement in SQLITE_REDUNDANT_INDEXES:
             conn.execute(text(statement))
 
 
@@ -177,6 +197,51 @@ def _backfill_sqlite_dedupe_columns(engine: Engine) -> None:
     _backfill_cash_dedupe_keys(engine)
 
 
+def _dedupe_sqlite_rows_for_unique_keys(engine: Engine) -> None:
+    if engine.dialect.name != "sqlite":
+        return
+
+    statements = [
+        """
+        DELETE FROM trades_raw
+        WHERE row_hash IS NOT NULL
+          AND EXISTS (
+            SELECT 1
+            FROM trades_raw older
+            WHERE older.account_id = trades_raw.account_id
+              AND older.row_hash = trades_raw.row_hash
+              AND older.id < trades_raw.id
+          )
+        """,
+        """
+        DELETE FROM trades_normalized
+        WHERE dedupe_key IS NOT NULL
+          AND EXISTS (
+            SELECT 1
+            FROM trades_normalized older
+            WHERE older.account_id = trades_normalized.account_id
+              AND older.dedupe_key = trades_normalized.dedupe_key
+              AND older.id < trades_normalized.id
+          )
+        """,
+        """
+        DELETE FROM cash_activity
+        WHERE dedupe_key IS NOT NULL
+          AND EXISTS (
+            SELECT 1
+            FROM cash_activity older
+            WHERE older.account_id = cash_activity.account_id
+              AND older.dedupe_key = cash_activity.dedupe_key
+              AND older.id < cash_activity.id
+          )
+        """,
+    ]
+
+    with engine.begin() as conn:
+        for statement in statements:
+            conn.execute(text(statement))
+
+
 def build_engine(database_url: str | None = None) -> Engine:
     settings = get_settings()
     url = database_url or settings.database_url
@@ -196,8 +261,10 @@ def migrate(database_url: str | None = None) -> Engine:
     engine = build_engine(database_url=database_url)
     Base.metadata.create_all(bind=engine)
     _ensure_sqlite_columns(engine)
-    _ensure_sqlite_indexes(engine)
     _backfill_sqlite_dedupe_columns(engine)
+    _dedupe_sqlite_rows_for_unique_keys(engine)
+    _drop_sqlite_redundant_indexes(engine)
+    _ensure_sqlite_indexes(engine)
     return engine
 
 

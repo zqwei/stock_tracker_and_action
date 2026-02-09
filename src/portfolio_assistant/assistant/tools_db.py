@@ -61,6 +61,28 @@ def _chunked(rows: list[dict], batch_size: int) -> Iterable[list[dict]]:
         yield rows[start : start + batch_size]
 
 
+def _dedupe_batch_rows_by_key(
+    rows: list[dict],
+    key_field: str,
+    *,
+    account_field: str = "account_id",
+) -> list[dict]:
+    seen: set[tuple[str, str]] = set()
+    out: list[dict] = []
+    for row in rows:
+        key_val = row.get(key_field)
+        account_val = row.get(account_field)
+        if key_val is None or account_val is None:
+            out.append(row)
+            continue
+        token = (str(account_val), str(key_val))
+        if token in seen:
+            continue
+        seen.add(token)
+        out.append(row)
+    return out
+
+
 def _filter_new_rows_by_key(
     session: Session,
     model,
@@ -133,6 +155,47 @@ def _bulk_insert(session: Session, model, rows: list[dict], batch_size: int = 20
     return inserted
 
 
+def _bulk_insert_ignore_conflicts(
+    session: Session,
+    model,
+    rows: list[dict],
+    *,
+    conflict_fields: tuple[str, ...],
+    key_field: str,
+    batch_size: int = 5000,
+) -> int:
+    if not rows:
+        return 0
+
+    bind = session.get_bind()
+    dialect_name = bind.dialect.name if bind is not None else ""
+    inserted = 0
+    if dialect_name == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+        for chunk in _chunked(rows, batch_size=batch_size):
+            stmt = sqlite_insert(model).values(chunk).on_conflict_do_nothing(
+                index_elements=list(conflict_fields)
+            )
+            result = session.execute(stmt)
+            inserted += max(int(result.rowcount or 0), 0)
+        return inserted
+
+    if dialect_name == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+
+        for chunk in _chunked(rows, batch_size=batch_size):
+            stmt = postgresql_insert(model).values(chunk).on_conflict_do_nothing(
+                index_elements=list(conflict_fields)
+            )
+            result = session.execute(stmt)
+            inserted += max(int(result.rowcount or 0), 0)
+        return inserted
+
+    filtered_rows = _filter_new_rows_by_key(session, model, rows, key_field=key_field)
+    return _bulk_insert(session, model, filtered_rows, batch_size=batch_size)
+
+
 def insert_trade_import(
     session: Session,
     account_id: str,
@@ -168,15 +231,29 @@ def insert_trade_import(
         normalized["dedupe_key"] = normalized.get("dedupe_key") or trade_dedupe_key(normalized)
         prepared_normalized_rows.append(normalized)
 
-    prepared_raw_rows = _filter_new_rows_by_key(
-        session, TradeRaw, prepared_raw_rows, key_field="row_hash"
+    prepared_raw_rows = _dedupe_batch_rows_by_key(
+        prepared_raw_rows,
+        key_field="row_hash",
     )
-    prepared_normalized_rows = _filter_new_rows_by_key(
-        session, TradeNormalized, prepared_normalized_rows, key_field="dedupe_key"
+    prepared_normalized_rows = _dedupe_batch_rows_by_key(
+        prepared_normalized_rows,
+        key_field="dedupe_key",
     )
 
-    raw_count = _bulk_insert(session, TradeRaw, prepared_raw_rows)
-    normalized_count = _bulk_insert(session, TradeNormalized, prepared_normalized_rows)
+    raw_count = _bulk_insert_ignore_conflicts(
+        session,
+        TradeRaw,
+        prepared_raw_rows,
+        conflict_fields=("account_id", "row_hash"),
+        key_field="row_hash",
+    )
+    normalized_count = _bulk_insert_ignore_conflicts(
+        session,
+        TradeNormalized,
+        prepared_normalized_rows,
+        conflict_fields=("account_id", "dedupe_key"),
+        key_field="dedupe_key",
+    )
     return raw_count, normalized_count
 
 
@@ -187,10 +264,17 @@ def insert_cash_activity(session: Session, rows: Iterable[dict]) -> int:
         payload["dedupe_key"] = payload.get("dedupe_key") or cash_dedupe_key(payload)
         prepared_rows.append(payload)
 
-    prepared_rows = _filter_new_rows_by_key(
-        session, CashActivity, prepared_rows, key_field="dedupe_key"
+    prepared_rows = _dedupe_batch_rows_by_key(
+        prepared_rows,
+        key_field="dedupe_key",
     )
-    return _bulk_insert(session, CashActivity, prepared_rows)
+    return _bulk_insert_ignore_conflicts(
+        session,
+        CashActivity,
+        prepared_rows,
+        conflict_fields=("account_id", "dedupe_key"),
+        key_field="dedupe_key",
+    )
 
 
 def clear_derived_tables(session: Session) -> None:

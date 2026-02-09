@@ -129,8 +129,7 @@ def normalize_trade_records(
         canonical_fields=TRADE_CANONICAL_FIELDS,
         required_fields=TRADE_REQUIRED_FIELDS,
     ).fillna("")
-    for idx, row in renamed.iterrows():
-        row_data = row.to_dict()
+    for row_number, row_data in enumerate(renamed.to_dict(orient="records"), start=1):
         executed_at = parse_datetime(row_data.get("executed_at"))
         side = normalize_side(row_data.get("side"))
 
@@ -173,28 +172,28 @@ def normalize_trade_records(
             side = "SELL"
 
         if executed_at is None:
-            issues.append(f"Row {idx + 1}: invalid executed_at")
+            issues.append(f"Row {row_number}: invalid executed_at")
             continue
         if not side:
-            issues.append(f"Row {idx + 1}: missing side")
+            issues.append(f"Row {row_number}: missing side")
             continue
         if instrument_type == "STOCK" and side not in {"BUY", "SELL"}:
-            issues.append(f"Row {idx + 1}: invalid stock side '{side}'")
+            issues.append(f"Row {row_number}: invalid stock side '{side}'")
             continue
         if instrument_type == "OPTION" and side not in {"BUY", "SELL", "BTO", "STO", "BTC", "STC"}:
-            issues.append(f"Row {idx + 1}: invalid option side '{side}'")
+            issues.append(f"Row {row_number}: invalid option side '{side}'")
             continue
         if quantity <= 0:
-            issues.append(f"Row {idx + 1}: quantity must be > 0")
+            issues.append(f"Row {row_number}: quantity must be > 0")
             continue
         if price < 0:
-            issues.append(f"Row {idx + 1}: price cannot be negative")
+            issues.append(f"Row {row_number}: price cannot be negative")
             continue
         if instrument_type == "OPTION" and multiplier <= 0:
-            issues.append(f"Row {idx + 1}: option multiplier must be > 0")
+            issues.append(f"Row {row_number}: option multiplier must be > 0")
             continue
         if not symbol and not underlying:
-            issues.append(f"Row {idx + 1}: symbol/underlying missing")
+            issues.append(f"Row {row_number}: symbol/underlying missing")
             continue
 
         normalized_rows.append(
@@ -244,12 +243,11 @@ def normalize_cash_records(
         canonical_fields=CASH_CANONICAL_FIELDS,
         required_fields=CASH_REQUIRED_FIELDS,
     ).fillna("")
-    for idx, row in renamed.iterrows():
-        row_data = row.to_dict()
+    for row_number, row_data in enumerate(renamed.to_dict(orient="records"), start=1):
         posted_at = parse_datetime(row_data.get("posted_at"))
         raw_amount = parse_float(row_data.get("amount"))
         if raw_amount is None:
-            issues.append(f"Cash row {idx + 1}: invalid amount")
+            issues.append(f"Cash row {row_number}: invalid amount")
             continue
 
         amount = abs(raw_amount)
@@ -259,10 +257,10 @@ def normalize_cash_records(
         is_external = is_external_cash_guess(description=description, source=source)
 
         if posted_at is None:
-            issues.append(f"Cash row {idx + 1}: invalid posted_at")
+            issues.append(f"Cash row {row_number}: invalid posted_at")
             continue
         if amount <= 0:
-            issues.append(f"Cash row {idx + 1}: amount must be > 0")
+            issues.append(f"Cash row {row_number}: amount must be > 0")
             continue
 
         rows.append(

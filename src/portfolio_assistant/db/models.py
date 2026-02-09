@@ -83,9 +83,9 @@ class TradeRaw(Base):
         UniqueConstraint(
             "account_id", "source_file", "row_index", name="uq_trades_raw_row"
         ),
+        UniqueConstraint("account_id", "row_hash", name="uq_trades_raw_account_row_hash"),
         Index("ix_trades_raw_account_signature", "account_id", "file_signature"),
         Index("ix_trades_raw_account_imported_at", "account_id", "imported_at"),
-        Index("ix_trades_raw_account_row_hash", "account_id", "row_hash"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -106,12 +106,13 @@ class TradeNormalized(Base):
     __tablename__ = "trades_normalized"
     __table_args__ = (
         Index("ix_trades_norm_account_exec_id", "account_id", "executed_at", "id"),
+        Index("ix_trades_norm_exec_id", "executed_at", "id"),
         Index("ix_trades_norm_symbol_side_exec", "symbol", "side", "executed_at"),
         Index(
             "ix_trades_norm_underlying_side_exec", "underlying", "side", "executed_at"
         ),
         Index("ix_trades_norm_account_symbol_exec", "account_id", "symbol", "executed_at"),
-        Index("ix_trades_norm_account_dedupe", "account_id", "dedupe_key"),
+        UniqueConstraint("account_id", "dedupe_key", name="uq_trades_norm_account_dedupe"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -154,7 +155,8 @@ class CashActivity(Base):
             "is_external",
             "posted_at",
         ),
-        Index("ix_cash_activity_account_dedupe", "account_id", "dedupe_key"),
+        Index("ix_cash_activity_account_posted", "account_id", "posted_at"),
+        UniqueConstraint("account_id", "dedupe_key", name="uq_cash_activity_account_dedupe"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -194,6 +196,7 @@ class PnlRealized(Base):
     __tablename__ = "pnl_realized"
     __table_args__ = (
         Index("ix_pnl_realized_account_close", "account_id", "close_date"),
+        Index("ix_pnl_realized_account_close_id", "account_id", "close_date", "id"),
         Index("ix_pnl_realized_symbol_close", "symbol", "close_date"),
         Index(
             "ix_pnl_realized_account_symbol_inst",
@@ -231,6 +234,7 @@ class PositionOpen(Base):
             name="uq_positions_open_key",
         ),
         Index("ix_positions_open_account_asof", "account_id", "as_of"),
+        Index("ix_positions_open_account_asof_id", "account_id", "as_of", "id"),
         Index(
             "ix_positions_open_account_symbol_inst",
             "account_id",
