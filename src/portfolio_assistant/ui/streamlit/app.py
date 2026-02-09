@@ -23,6 +23,12 @@ from portfolio_assistant.analytics.reconciliation import (
     net_contributions,
     realized_by_symbol,
 )
+from portfolio_assistant.analytics.benchmarks import (
+    BENCHMARK_SYMBOLS,
+    WINDOW_LABELS,
+    compute_all_window_metrics,
+    compute_window_metrics,
+)
 from portfolio_assistant.analytics.wash_sale import detect_wash_sale_risks
 from portfolio_assistant.assistant.ask_gpt import ask_portfolio_question
 from portfolio_assistant.assistant.daily_briefing import (
@@ -75,6 +81,7 @@ CORE_NAV_ITEMS = [
     "Import Trades",
     "Import Cash",
     "Overview",
+    "Benchmarks",
     "Calendar",
     "Wash Sale Risk",
     "Data Quality",
@@ -106,6 +113,13 @@ def _load_accounts(engine) -> list[Account]:
 def _money(value: float) -> str:
     sign = "+" if value > 0 else ""
     return f"{sign}{value:,.2f}"
+
+
+def _pct(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    sign = "+" if value > 0 else ""
+    return f"{sign}{value * 100:.2f}%"
 
 
 def _safe_key(value: str) -> str:
@@ -868,6 +882,149 @@ def _render_overview(
             st.dataframe(positions_df, use_container_width=True, hide_index=True)
 
 
+def _render_benchmarks(engine, account_filter_id: str | None) -> None:
+    st.header("Benchmarks")
+    st.caption(
+        "Money-weighted return (XIRR) vs benchmark proxies (DIA / SPY / QQQ) "
+        "across standard windows."
+    )
+    st.info("Educational analytics only, not financial or tax advice.")
+
+    controls = st.columns([2, 2, 1])
+    selected_window = controls[0].selectbox(
+        "Window",
+        options=WINDOW_LABELS,
+        index=0,
+        key="benchmark_window",
+    )
+    as_of_date = controls[1].date_input(
+        "As-of date",
+        value=date.today(),
+        key="benchmark_as_of_date",
+    )
+    refresh = controls[2].button("Refresh", key="benchmark_refresh")
+
+    if refresh:
+        st.rerun()
+
+    with Session(engine) as session:
+        selected = compute_window_metrics(
+            session,
+            account_id=account_filter_id,
+            window=selected_window,
+            as_of=as_of_date,
+        )
+        all_windows = compute_all_window_metrics(
+            session,
+            account_id=account_filter_id,
+            as_of=as_of_date,
+        )
+
+    st.caption(
+        f"Window range: {selected['start_date'].isoformat()} → {selected['end_date'].isoformat()}"
+    )
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Portfolio return", _pct(selected["portfolio_return"]))
+    c2.metric("XIRR (annualized)", _pct(selected["xirr_annualized"]))
+    c3.metric("Start equity", _money(float(selected["start_equity"])))
+    c4.metric("End equity", _money(float(selected["end_equity"])))
+    c5.metric("External net flow", _money(float(selected["external_net_flow"])))
+
+    benchmark_rows: list[dict[str, float | str | None]] = []
+    portfolio_return = selected.get("portfolio_return")
+    benchmark_rows.append(
+        {
+            "series": "Portfolio (money-weighted)",
+            "return_value": portfolio_return,
+            "return": _pct(portfolio_return),
+            "delta_vs_portfolio": _pct(0.0 if portfolio_return is not None else None),
+        }
+    )
+
+    for symbol in BENCHMARK_SYMBOLS:
+        value = selected["benchmark_returns"].get(symbol)
+        delta = (
+            None
+            if value is None or portfolio_return is None
+            else float(portfolio_return) - float(value)
+        )
+        benchmark_rows.append(
+            {
+                "series": symbol,
+                "return_value": value,
+                "return": _pct(value),
+                "delta_vs_portfolio": _pct(delta),
+            }
+        )
+
+    benchmark_df = pd.DataFrame(benchmark_rows)
+    st.subheader("Selected window comparison")
+    st.dataframe(
+        benchmark_df[["series", "return", "delta_vs_portfolio"]],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    chart_df = benchmark_df.dropna(subset=["return_value"]).copy()
+    if alt is not None and not chart_df.empty:
+        chart = (
+            alt.Chart(chart_df)
+            .mark_bar()
+            .encode(
+                x=alt.X("series:N", title="Series", sort=None),
+                y=alt.Y("return_value:Q", title="Return"),
+                color=alt.condition(
+                    "datum.return_value >= 0",
+                    alt.value("#1b9e77"),
+                    alt.value("#d95f02"),
+                ),
+                tooltip=[
+                    alt.Tooltip("series:N", title="Series"),
+                    alt.Tooltip("return_value:Q", title="Return", format=".2%"),
+                ],
+            )
+            .properties(height=260)
+        )
+        st.altair_chart(chart, use_container_width=True)
+
+    missing_bench = selected.get("missing_benchmark_symbols") or []
+    if missing_bench:
+        st.warning(
+            "Missing benchmark prices for: "
+            + ", ".join(str(symbol) for symbol in missing_bench)
+            + ". Seed `price_cache` rows to enable full comparison."
+        )
+
+    missing_positions = sorted(
+        set(selected.get("missing_position_prices_start") or [])
+        | set(selected.get("missing_position_prices_end") or [])
+    )
+    if missing_positions:
+        st.warning(
+            "Missing position prices for: "
+            + ", ".join(missing_positions)
+            + ". Portfolio return may be understated."
+        )
+
+    summary_rows = []
+    for row in all_windows:
+        summary_rows.append(
+            {
+                "window": row["window"],
+                "portfolio": _pct(row.get("portfolio_return")),
+                "xirr_annualized": _pct(row.get("xirr_annualized")),
+                "DIA": _pct(row["benchmark_returns"].get("DIA")),
+                "SPY": _pct(row["benchmark_returns"].get("SPY")),
+                "QQQ": _pct(row["benchmark_returns"].get("QQQ")),
+                "start": row["start_date"].isoformat(),
+                "end": row["end_date"].isoformat(),
+            }
+        )
+    st.subheader("All windows")
+    st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+
+
 def _render_calendar(engine, account_filter_id: str | None) -> None:
     st.header("Calendar")
     st.caption("Daily realized P&L view with date filtering and summary stats.")
@@ -1311,6 +1468,8 @@ def main() -> None:
         _render_import_cash(engine, accounts, account_filter_id)
     elif nav == "Overview":
         _render_overview(engine, account_filter_id, accounts)
+    elif nav == "Benchmarks":
+        _render_benchmarks(engine, account_filter_id)
     elif nav == "Calendar":
         _render_calendar(engine, account_filter_id)
     elif nav == "Wash Sale Risk":
