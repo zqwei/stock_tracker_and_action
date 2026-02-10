@@ -69,6 +69,7 @@ from portfolio_assistant.ingest.csv_mapping import (
     save_trade_mapping,
 )
 from portfolio_assistant.ingest.validators import parse_datetime
+from portfolio_assistant.utils.money import format_money, format_percent
 
 try:
     import altair as alt
@@ -111,15 +112,11 @@ def _load_accounts(engine) -> list[Account]:
 
 
 def _money(value: float) -> str:
-    sign = "+" if value > 0 else ""
-    return f"{sign}{value:,.2f}"
+    return format_money(value, signed=True)
 
 
 def _pct(value: float | None) -> str:
-    if value is None:
-        return "n/a"
-    sign = "+" if value > 0 else ""
-    return f"{sign}{value * 100:.2f}%"
+    return format_percent(value, signed=True)
 
 
 def _safe_key(value: str) -> str:

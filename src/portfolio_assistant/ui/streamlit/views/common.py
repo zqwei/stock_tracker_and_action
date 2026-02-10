@@ -12,6 +12,7 @@ from portfolio_assistant.assistant.tools_db import get_engine, list_accounts
 from portfolio_assistant.config.paths import ensure_data_dirs
 from portfolio_assistant.db.migrate import migrate
 from portfolio_assistant.db.models import Account
+from portfolio_assistant.utils.money import format_money
 
 ACCOUNT_SCOPE_SESSION_KEY = "global_account_filter_id"
 
@@ -21,8 +22,7 @@ def _enum_value(value: Any) -> str:
 
 
 def money(value: float) -> str:
-    sign = "+" if value > 0 else ""
-    return f"{sign}{value:,.2f}"
+    return format_money(value, signed=True)
 
 
 def account_label(account: Account) -> str:
@@ -129,4 +129,3 @@ def export_filename(prefix: str, accounts: list[Account], account_filter_id: str
 
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[5]
-
