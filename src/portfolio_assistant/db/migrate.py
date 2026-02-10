@@ -22,6 +22,19 @@ SQLITE_EXTRA_COLUMNS: dict[str, dict[str, str]] = {
     "cash_activity": {
         "dedupe_key": "VARCHAR(96)",
     },
+    "pnl_realized": {
+        "disposal_label": "VARCHAR(256)",
+        "security_id": "VARCHAR(32)",
+        "acquired_date": "DATE",
+        "disposal_term": "VARCHAR(16)",
+        "close_trade_row_id": "INTEGER",
+        "loss_trade_row_id": "INTEGER",
+        "lot_method": "VARCHAR(32)",
+        "adjustment_codes": "VARCHAR(16)",
+        "adjustment_amount": "FLOAT",
+        "wash_sale_disallowed": "FLOAT",
+        "disposal_metadata": "JSON",
+    },
 }
 
 SQLITE_EXTRA_INDEXES = [
@@ -43,10 +56,30 @@ SQLITE_EXTRA_INDEXES = [
     "CREATE INDEX IF NOT EXISTS ix_pnl_realized_account_close ON pnl_realized (account_id, close_date)",
     "CREATE INDEX IF NOT EXISTS ix_pnl_realized_account_close_id ON pnl_realized (account_id, close_date, id)",
     "CREATE INDEX IF NOT EXISTS ix_pnl_realized_symbol_close ON pnl_realized (symbol, close_date)",
+    "CREATE INDEX IF NOT EXISTS ix_pnl_realized_disposal_term_close ON pnl_realized (disposal_term, close_date)",
+    "CREATE INDEX IF NOT EXISTS ix_pnl_realized_security_close ON pnl_realized (security_id, close_date)",
+    "CREATE INDEX IF NOT EXISTS ix_pnl_realized_close_trade_row ON pnl_realized (close_trade_row_id)",
+    "CREATE INDEX IF NOT EXISTS ix_pnl_realized_loss_trade_row ON pnl_realized (loss_trade_row_id)",
     "CREATE INDEX IF NOT EXISTS ix_pnl_realized_account_symbol_inst ON pnl_realized (account_id, symbol, instrument_type)",
     "CREATE INDEX IF NOT EXISTS ix_positions_open_account_asof ON positions_open (account_id, as_of)",
     "CREATE INDEX IF NOT EXISTS ix_positions_open_account_asof_id ON positions_open (account_id, as_of, id)",
     "CREATE INDEX IF NOT EXISTS ix_positions_open_account_symbol_inst ON positions_open (account_id, symbol, instrument_type)",
+    "CREATE INDEX IF NOT EXISTS ix_reconciliation_runs_tax_year_created ON reconciliation_runs (tax_year, created_at)",
+    "CREATE INDEX IF NOT EXISTS ix_reconciliation_runs_account_tax_year ON reconciliation_runs (account_id, tax_year)",
+    "CREATE INDEX IF NOT EXISTS ix_reconciliation_runs_status_created ON reconciliation_runs (status, created_at)",
+    "CREATE INDEX IF NOT EXISTS ix_reconciliation_artifacts_run_type ON reconciliation_artifacts (reconciliation_run_id, artifact_type)",
+    "CREATE INDEX IF NOT EXISTS ix_reconciliation_artifacts_tax_year_type ON reconciliation_artifacts (tax_year, artifact_type)",
+    "CREATE INDEX IF NOT EXISTS ix_wash_sale_adjustments_mode_tax_year ON wash_sale_adjustments (mode, tax_year)",
+    "CREATE INDEX IF NOT EXISTS ix_wash_sale_adjustments_symbol_sale_date ON wash_sale_adjustments (sale_symbol, sale_date)",
+    "CREATE INDEX IF NOT EXISTS ix_wash_sale_adjustments_replacement_account_exec ON wash_sale_adjustments (replacement_account_id, replacement_executed_at)",
+    "CREATE INDEX IF NOT EXISTS ix_wash_sale_adjustments_reconciliation_run ON wash_sale_adjustments (reconciliation_run_id)",
+    "CREATE INDEX IF NOT EXISTS ix_feed_sources_type_provider ON feed_sources (feed_type, provider)",
+    "CREATE INDEX IF NOT EXISTS ix_feed_sources_symbol_type ON feed_sources (symbol, feed_type)",
+    "CREATE INDEX IF NOT EXISTS ix_feed_sources_status_next_poll ON feed_sources (status, next_poll_after)",
+    "CREATE INDEX IF NOT EXISTS ix_feed_ingest_runs_source_started ON feed_ingest_runs (feed_source_id, started_at)",
+    "CREATE INDEX IF NOT EXISTS ix_feed_ingest_runs_status_started ON feed_ingest_runs (status, started_at)",
+    "CREATE INDEX IF NOT EXISTS ix_feed_items_source_published ON feed_items (feed_source_id, published_at)",
+    "CREATE INDEX IF NOT EXISTS ix_feed_items_symbol_published ON feed_items (symbol, published_at)",
 ]
 
 SQLITE_REDUNDANT_INDEXES = [

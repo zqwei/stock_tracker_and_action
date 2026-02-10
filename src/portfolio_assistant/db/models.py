@@ -59,6 +59,60 @@ class CashActivityType(str, Enum):
     WITHDRAWAL = "WITHDRAWAL"
 
 
+class DisposalTerm(str, Enum):
+    SHORT = "SHORT"
+    LONG = "LONG"
+    UNKNOWN = "UNKNOWN"
+
+
+class WashSaleComputationMode(str, Enum):
+    BROKER = "BROKER"
+    IRS = "IRS"
+
+
+class WashSaleAdjustmentStatus(str, Enum):
+    PROPOSED = "PROPOSED"
+    APPLIED = "APPLIED"
+    REVERSED = "REVERSED"
+
+
+class ReconciliationRunStatus(str, Enum):
+    DRAFT = "DRAFT"
+    COMPLETE = "COMPLETE"
+    SUPERSEDED = "SUPERSEDED"
+
+
+class ReconciliationArtifactType(str, Enum):
+    BROKER_INPUT = "BROKER_INPUT"
+    APP_8949 = "APP_8949"
+    APP_SUMMARY = "APP_SUMMARY"
+    DIFF_SYMBOL = "DIFF_SYMBOL"
+    DIFF_SALE_DATE = "DIFF_SALE_DATE"
+    DIFF_TERM = "DIFF_TERM"
+    CHECKLIST = "CHECKLIST"
+    PACKET = "PACKET"
+
+
+class FeedType(str, Enum):
+    PRICE = "PRICE"
+    EARNINGS = "EARNINGS"
+    MACRO = "MACRO"
+    NEWS = "NEWS"
+
+
+class FeedSyncStatus(str, Enum):
+    ACTIVE = "ACTIVE"
+    PAUSED = "PAUSED"
+    ERROR = "ERROR"
+
+
+class FeedRunStatus(str, Enum):
+    PENDING = "PENDING"
+    SUCCESS = "SUCCESS"
+    PARTIAL = "PARTIAL"
+    FAILED = "FAILED"
+
+
 class Account(Base):
     __tablename__ = "accounts"
     __table_args__ = (
@@ -198,6 +252,10 @@ class PnlRealized(Base):
         Index("ix_pnl_realized_account_close", "account_id", "close_date"),
         Index("ix_pnl_realized_account_close_id", "account_id", "close_date", "id"),
         Index("ix_pnl_realized_symbol_close", "symbol", "close_date"),
+        Index("ix_pnl_realized_disposal_term_close", "disposal_term", "close_date"),
+        Index("ix_pnl_realized_security_close", "security_id", "close_date"),
+        Index("ix_pnl_realized_close_trade_row", "close_trade_row_id"),
+        Index("ix_pnl_realized_loss_trade_row", "loss_trade_row_id"),
         Index(
             "ix_pnl_realized_account_symbol_inst",
             "account_id",
@@ -221,6 +279,236 @@ class PnlRealized(Base):
     fees: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     pnl: Mapped[float] = mapped_column(Float, nullable=False)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    disposal_label: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    security_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    acquired_date: Mapped[Date | None] = mapped_column(Date, nullable=True)
+    disposal_term: Mapped[DisposalTerm | None] = mapped_column(
+        SqlEnum(DisposalTerm, native_enum=False), nullable=True
+    )
+    close_trade_row_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    loss_trade_row_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    lot_method: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    adjustment_codes: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    adjustment_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    wash_sale_disallowed: Mapped[float | None] = mapped_column(Float, nullable=True)
+    disposal_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class ReconciliationRun(Base):
+    __tablename__ = "reconciliation_runs"
+    __table_args__ = (
+        Index("ix_reconciliation_runs_tax_year_created", "tax_year", "created_at"),
+        Index("ix_reconciliation_runs_account_tax_year", "account_id", "tax_year"),
+        Index("ix_reconciliation_runs_status_created", "status", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid4())
+    )
+    tax_year: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    account_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("accounts.id"), nullable=True, index=True
+    )
+    broker: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    scope_label: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    broker_input_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    status: Mapped[ReconciliationRunStatus] = mapped_column(
+        SqlEnum(ReconciliationRunStatus, native_enum=False),
+        nullable=False,
+        default=ReconciliationRunStatus.DRAFT,
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    run_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class ReconciliationArtifact(Base):
+    __tablename__ = "reconciliation_artifacts"
+    __table_args__ = (
+        UniqueConstraint(
+            "reconciliation_run_id",
+            "artifact_type",
+            "artifact_name",
+            name="uq_reconciliation_artifacts_run_type_name",
+        ),
+        Index(
+            "ix_reconciliation_artifacts_run_type",
+            "reconciliation_run_id",
+            "artifact_type",
+        ),
+        Index("ix_reconciliation_artifacts_tax_year_type", "tax_year", "artifact_type"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    reconciliation_run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("reconciliation_runs.id"), nullable=False, index=True
+    )
+    tax_year: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    artifact_type: Mapped[ReconciliationArtifactType] = mapped_column(
+        SqlEnum(ReconciliationArtifactType, native_enum=False), nullable=False, index=True
+    )
+    artifact_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    storage_format: Mapped[str] = mapped_column(String(24), nullable=False, default="json")
+    file_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    row_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
+
+
+class WashSaleAdjustment(Base):
+    __tablename__ = "wash_sale_adjustments"
+    __table_args__ = (
+        UniqueConstraint(
+            "mode",
+            "loss_sale_row_id",
+            "replacement_trade_row_id",
+            "adjustment_sequence",
+            name="uq_wash_sale_adjustments_mode_sale_replacement",
+        ),
+        Index("ix_wash_sale_adjustments_mode_tax_year", "mode", "tax_year"),
+        Index("ix_wash_sale_adjustments_symbol_sale_date", "sale_symbol", "sale_date"),
+        Index(
+            "ix_wash_sale_adjustments_replacement_account_exec",
+            "replacement_account_id",
+            "replacement_executed_at",
+        ),
+        Index("ix_wash_sale_adjustments_reconciliation_run", "reconciliation_run_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    mode: Mapped[WashSaleComputationMode] = mapped_column(
+        SqlEnum(WashSaleComputationMode, native_enum=False), nullable=False, index=True
+    )
+    tax_year: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    reconciliation_run_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("reconciliation_runs.id"), nullable=True, index=True
+    )
+    loss_sale_row_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("pnl_realized.id"), nullable=False, index=True
+    )
+    loss_trade_row_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("trades_normalized.id"), nullable=True, index=True
+    )
+    replacement_trade_row_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("trades_normalized.id"), nullable=True, index=True
+    )
+    replacement_account_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("accounts.id"), nullable=True, index=True
+    )
+    sale_symbol: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    sale_date: Mapped[Date] = mapped_column(Date, nullable=False, index=True)
+    replacement_executed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    window_offset_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    replacement_quantity_equiv: Mapped[float] = mapped_column(Float, nullable=False)
+    disallowed_loss: Mapped[float] = mapped_column(Float, nullable=False)
+    basis_adjustment: Mapped[float | None] = mapped_column(Float, nullable=True)
+    permanently_disallowed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    adjustment_sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[WashSaleAdjustmentStatus] = mapped_column(
+        SqlEnum(WashSaleAdjustmentStatus, native_enum=False),
+        nullable=False,
+        default=WashSaleAdjustmentStatus.PROPOSED,
+    )
+    rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
+    adjustment_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
+
+
+class FeedSource(Base):
+    __tablename__ = "feed_sources"
+    __table_args__ = (
+        UniqueConstraint("feed_type", "provider", "scope_key", name="uq_feed_sources_scope"),
+        Index("ix_feed_sources_type_provider", "feed_type", "provider"),
+        Index("ix_feed_sources_symbol_type", "symbol", "feed_type"),
+        Index("ix_feed_sources_status_next_poll", "status", "next_poll_after"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    feed_type: Mapped[FeedType] = mapped_column(
+        SqlEnum(FeedType, native_enum=False), nullable=False, index=True
+    )
+    provider: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    scope_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    symbol: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    interval: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    request_params: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    etag: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    last_modified: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    cursor: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    status: Mapped[FeedSyncStatus] = mapped_column(
+        SqlEnum(FeedSyncStatus, native_enum=False),
+        nullable=False,
+        default=FeedSyncStatus.ACTIVE,
+        index=True,
+    )
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    next_poll_after: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
+
+
+class FeedIngestRun(Base):
+    __tablename__ = "feed_ingest_runs"
+    __table_args__ = (
+        Index("ix_feed_ingest_runs_source_started", "feed_source_id", "started_at"),
+        Index("ix_feed_ingest_runs_status_started", "status", "started_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    feed_source_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("feed_sources.id"), nullable=False, index=True
+    )
+    started_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    status: Mapped[FeedRunStatus] = mapped_column(
+        SqlEnum(FeedRunStatus, native_enum=False),
+        nullable=False,
+        default=FeedRunStatus.PENDING,
+        index=True,
+    )
+    http_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    fetched_items: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    upserted_items: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    deduped_items: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rate_limit_remaining: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    response_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class FeedItem(Base):
+    __tablename__ = "feed_items"
+    __table_args__ = (
+        UniqueConstraint("feed_type", "provider", "external_id", name="uq_feed_items_external"),
+        Index("ix_feed_items_source_published", "feed_source_id", "published_at"),
+        Index("ix_feed_items_symbol_published", "symbol", "published_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    feed_source_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("feed_sources.id"), nullable=True, index=True
+    )
+    feed_type: Mapped[FeedType] = mapped_column(
+        SqlEnum(FeedType, native_enum=False), nullable=False, index=True
+    )
+    provider: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    external_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    symbol: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    event_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    title: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    payload_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
 
 class PositionOpen(Base):
