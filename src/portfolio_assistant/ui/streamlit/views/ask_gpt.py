@@ -4,6 +4,7 @@ import streamlit as st
 
 from portfolio_assistant.ui.streamlit.app import _render_ask_gpt
 from portfolio_assistant.ui.streamlit.views.common import (
+    apply_page_theme,
     initialize_engine,
     load_accounts,
     render_global_account_scope,
@@ -13,6 +14,7 @@ from portfolio_assistant.ui.streamlit.views.common import (
 
 def render_page() -> None:
     st.set_page_config(page_title="Ask GPT", layout="wide")
+    apply_page_theme()
 
     engine = initialize_engine()
     accounts = load_accounts(engine)

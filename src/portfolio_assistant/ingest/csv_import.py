@@ -109,10 +109,17 @@ def load_cash_csv_preview(
 
 
 def normalize_trade_records(
-    df: pd.DataFrame, mapping: dict[str, str], account_id: str, broker: str
+    df: pd.DataFrame,
+    mapping: dict[str, str],
+    account_id: str,
+    broker: str,
+    default_instrument_type: str | None = None,
 ) -> tuple[list[dict], list[str]]:
     normalized_rows: list[dict] = []
     issues: list[str] = []
+    default_instrument = (default_instrument_type or "").strip().upper()
+    if default_instrument not in {"STOCK", "OPTION"}:
+        default_instrument = ""
 
     cleaned_mapping, mapping_errors = validate_mapping(
         mapping,
@@ -130,26 +137,55 @@ def normalize_trade_records(
         required_fields=TRADE_REQUIRED_FIELDS,
     ).fillna("")
     for row_number, row_data in enumerate(renamed.to_dict(orient="records"), start=1):
-        executed_at = parse_datetime(row_data.get("executed_at"))
         side = normalize_side(row_data.get("side"))
-
+        symbol_value = str(row_data.get("symbol", "")).strip().upper() or None
         option_symbol_raw = str(row_data.get("option_symbol_raw", "")).strip() or None
+        option_symbol_candidate = option_symbol_raw or symbol_value
+        parsed_option = parse_option_symbol(option_symbol_candidate)
+        instrument_value = row_data.get("instrument_type")
+        if not str(instrument_value or "").strip() and default_instrument:
+            instrument_value = default_instrument
         instrument_type = normalize_instrument_type(
-            row_data.get("instrument_type"), option_symbol_raw=option_symbol_raw
+            instrument_value,
+            option_symbol_raw=option_symbol_candidate if parsed_option else None,
         )
+        if side in {"BTO", "STO", "BTC", "STC"}:
+            instrument_type = "OPTION"
+        if parsed_option and instrument_type != "OPTION":
+            instrument_type = "OPTION"
+
         quantity = parse_float(row_data.get("quantity"), default=0.0) or 0.0
         quantity = abs(quantity)
+        if quantity <= 0:
+            issues.append(f"Row {row_number}: skipped non-filled row (quantity <= 0)")
+            continue
+
+        executed_at = parse_datetime(row_data.get("executed_at"))
         price = parse_float(row_data.get("price"), default=0.0) or 0.0
-        fees = parse_float(row_data.get("fees"), default=0.0) or 0.0
+        fees_raw = parse_float(row_data.get("fees"))
+        total_cost = parse_float(row_data.get("total_cost"))
         multiplier_raw = parse_float(row_data.get("multiplier"), default=100.0)
         multiplier = int(multiplier_raw or 100)
+        if fees_raw is None:
+            fees = 0.0
+            if total_cost is not None:
+                effective_multiplier = multiplier if instrument_type == "OPTION" else 1
+                gross_notional = quantity * price * effective_multiplier
+                inferred_fees = abs(abs(total_cost) - gross_notional)
+                if inferred_fees > 0.005:
+                    fees = inferred_fees
+        else:
+            fees = abs(fees_raw)
 
-        symbol = str(row_data.get("symbol", "")).strip().upper() or None
-        parsed_option = parse_option_symbol(option_symbol_raw)
-        underlying = parsed_option.get("underlying") or symbol
+        if parsed_option and not option_symbol_raw:
+            option_symbol_raw = option_symbol_candidate
+
+        underlying = parsed_option.get("underlying") or symbol_value
         expiration = parsed_option.get("expiration")
         strike = parsed_option.get("strike")
         call_put = parsed_option.get("call_put")
+
+        symbol = underlying if instrument_type == "OPTION" else (symbol_value or underlying)
 
         if instrument_type == "OPTION" and not option_symbol_raw and underlying and expiration:
             option_symbol_raw = (
@@ -182,9 +218,6 @@ def normalize_trade_records(
             continue
         if instrument_type == "OPTION" and side not in {"BUY", "SELL", "BTO", "STO", "BTC", "STC"}:
             issues.append(f"Row {row_number}: invalid option side '{side}'")
-            continue
-        if quantity <= 0:
-            issues.append(f"Row {row_number}: quantity must be > 0")
             continue
         if price < 0:
             issues.append(f"Row {row_number}: price cannot be negative")

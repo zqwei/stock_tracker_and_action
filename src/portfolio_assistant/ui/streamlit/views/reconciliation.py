@@ -13,6 +13,7 @@ from portfolio_assistant.analytics.reconciliation import (
 )
 from portfolio_assistant.analytics.tax_year_report import generate_tax_year_report
 from portfolio_assistant.ui.streamlit.views.common import (
+    apply_page_theme,
     csv_download,
     export_filename,
     initialize_engine,
@@ -43,6 +44,16 @@ BROKER_CANONICAL_FIELDS = {
     "cost_basis": "Cost Basis",
     "gain_or_loss": "Gain/Loss",
     "wash_sale_disallowed": "Wash Sale Disallowed",
+}
+
+BROKER_FIELD_HELP = {
+    "symbol": "Ticker/underlying symbol for the sold lot.",
+    "date_sold": "Sale or close date for the realized row.",
+    "term": "Holding term if available (SHORT/LONG). Optional.",
+    "proceeds": "Sales proceeds. Optional when gain/loss is already provided.",
+    "cost_basis": "Cost basis. Optional when gain/loss is already provided.",
+    "gain_or_loss": "Realized gain/loss for the row. Used directly in reconciliation totals.",
+    "wash_sale_disallowed": "Disallowed wash-sale amount if provided by broker.",
 }
 
 
@@ -226,6 +237,7 @@ def checklist_dataframe(
 
 def render_page() -> None:
     st.set_page_config(page_title="Reconciliation", layout="wide")
+    apply_page_theme()
     st.header("Reconciliation")
     st.caption("Compare app tax-year totals against broker totals, then drill into differences.")
 
@@ -293,6 +305,7 @@ def render_page() -> None:
             default_mapping = infer_broker_mapping(list(raw_broker_frame.columns))
             mapping: dict[str, str | None] = {}
             with st.expander("Broker CSV mapping", expanded=False):
+                st.caption("Hover the info icon on each field for mapping guidance.")
                 for field, label in BROKER_CANONICAL_FIELDS.items():
                     options = ["<none>"] + list(raw_broker_frame.columns)
                     default_col = default_mapping.get(field)
@@ -302,6 +315,7 @@ def render_page() -> None:
                         options=options,
                         index=default_index,
                         key=f"recon_map_{field}",
+                        help=BROKER_FIELD_HELP.get(field, ""),
                     )
                     mapping[field] = None if selected == "<none>" else selected
 
@@ -408,4 +422,3 @@ def render_page() -> None:
             filename=export_filename("recon_checklist", accounts, account_filter_id),
             key="download_recon_checklist_csv",
         )
-

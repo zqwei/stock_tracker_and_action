@@ -12,6 +12,7 @@ from portfolio_assistant.assistant.tools_db import get_engine, list_accounts
 from portfolio_assistant.config.paths import ensure_data_dirs
 from portfolio_assistant.db.migrate import migrate
 from portfolio_assistant.db.models import Account
+from portfolio_assistant.ui.streamlit.theme import apply_futuristic_theme, render_theme_selector
 from portfolio_assistant.utils.money import format_money
 
 ACCOUNT_SCOPE_SESSION_KEY = "global_account_filter_id"
@@ -76,6 +77,7 @@ def render_global_account_scope(
 
     with st.sidebar:
         st.title(sidebar_title)
+        render_theme_selector()
         selected = st.selectbox(
             "Global account scope",
             options=options,
@@ -129,3 +131,7 @@ def export_filename(prefix: str, accounts: list[Account], account_filter_id: str
 
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[5]
+
+
+def apply_page_theme() -> None:
+    apply_futuristic_theme()

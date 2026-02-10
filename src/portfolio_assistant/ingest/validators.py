@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import pandas as pd
@@ -16,10 +16,48 @@ DATE_FORMATS = [
     "%m/%d/%Y %H:%M:%S",
 ]
 
+DATE_FORMATS_WITH_TZ = [
+    "%m/%d/%Y %H:%M:%S %z",
+    "%Y-%m-%d %H:%M:%S %z",
+    "%Y/%m/%d %H:%M:%S %z",
+]
+
+TZ_ABBR_OFFSETS = {
+    "EST": "-0500",
+    "EDT": "-0400",
+    "CST": "-0600",
+    "CDT": "-0500",
+    "MST": "-0700",
+    "MDT": "-0600",
+    "PST": "-0800",
+    "PDT": "-0700",
+    "UTC": "+0000",
+    "GMT": "+0000",
+}
+
 OCC_OPTION_RE = re.compile(r"^([A-Z]{1,6})(\d{2})(\d{2})(\d{2})([CP])(\d{8})$")
 SIMPLE_OPTION_RE = re.compile(
     r"^([A-Z.\-]{1,10})\s+(\d{4}-\d{2}-\d{2})\s+(\d+(?:\.\d+)?)\s*([CP])$"
 )
+
+TZ_SUFFIX_RE = re.compile(r"^(.*\d)\s+([A-Za-z]{2,4})$")
+
+
+def _to_naive_utc(parsed: datetime) -> datetime:
+    if parsed.tzinfo is None:
+        return parsed
+    return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _replace_tz_abbreviation(text: str) -> str:
+    match = TZ_SUFFIX_RE.match(text.strip())
+    if not match:
+        return text
+    base, abbr = match.groups()
+    offset = TZ_ABBR_OFFSETS.get(abbr.upper())
+    if offset is None:
+        return text
+    return f"{base} {offset}"
 
 
 def parse_datetime(value: Any) -> datetime | None:
@@ -29,10 +67,19 @@ def parse_datetime(value: Any) -> datetime | None:
     if not text:
         return None
 
-    parsed = pd.to_datetime(text, errors="coerce", utc=False)
+    text_with_offset = _replace_tz_abbreviation(text)
+
+    for fmt in DATE_FORMATS_WITH_TZ:
+        try:
+            return _to_naive_utc(datetime.strptime(text_with_offset, fmt))
+        except ValueError:
+            continue
+
+    parsed = pd.to_datetime(text_with_offset, errors="coerce", utc=False)
     if pd.notna(parsed):
         if isinstance(parsed, pd.Timestamp):
-            return parsed.to_pydatetime()
+            dt = parsed.to_pydatetime()
+            return _to_naive_utc(dt)
 
     for fmt in DATE_FORMATS:
         try:
@@ -45,7 +92,16 @@ def parse_datetime(value: Any) -> datetime | None:
 def parse_float(value: Any, default: float | None = None) -> float | None:
     if value is None:
         return default
-    text = str(value).strip().replace(",", "").replace("$", "")
+    text = (
+        str(value)
+        .strip()
+        .replace(",", "")
+        .replace("$", "")
+        .replace("@", "")
+        .replace("US$", "")
+        .replace("USD", "")
+        .strip()
+    )
     if text == "":
         return default
     if text.startswith("(") and text.endswith(")"):

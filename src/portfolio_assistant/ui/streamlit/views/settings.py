@@ -11,6 +11,7 @@ from portfolio_assistant.analytics.pnl_engine import recompute_pnl
 from portfolio_assistant.db.models import Account, CashActivity, PnlRealized, PositionOpen, TradeNormalized
 from portfolio_assistant.ui.streamlit.views.common import (
     account_label,
+    apply_page_theme,
     csv_download,
     export_filename,
     initialize_engine,
@@ -86,6 +87,7 @@ def account_catalog_dataframe(accounts: list[Account]) -> pd.DataFrame:
 
 def render_page() -> None:
     st.set_page_config(page_title="Settings", layout="wide")
+    apply_page_theme()
     st.header("Settings")
     st.caption("Data quality checks and account metadata for the selected account scope.")
 
@@ -132,4 +134,3 @@ def render_page() -> None:
             filename=export_filename("settings_accounts", accounts, account_filter_id),
             key="download_settings_accounts_csv",
         )
-

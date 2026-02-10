@@ -12,6 +12,7 @@ from portfolio_assistant.analytics.reconciliation import contributions_by_month,
 from portfolio_assistant.db.models import Account, CashActivity
 from portfolio_assistant.ui.streamlit.views.common import (
     account_label,
+    apply_page_theme,
     csv_download,
     export_filename,
     initialize_engine,
@@ -97,6 +98,7 @@ def account_contributions_dataframe(activity_frame: pd.DataFrame) -> pd.DataFram
 
 def render_page() -> None:
     st.set_page_config(page_title="Contributions", layout="wide")
+    apply_page_theme()
     st.header("Contributions")
     st.caption("External deposits and withdrawals for the selected global account scope.")
 
@@ -156,4 +158,3 @@ def render_page() -> None:
                 filename=export_filename("contributions_activity", accounts, account_filter_id),
                 key="download_contrib_activity_csv",
             )
-

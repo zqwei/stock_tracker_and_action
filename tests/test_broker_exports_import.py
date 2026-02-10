@@ -45,6 +45,51 @@ def test_normalize_broker_export_records_infers_columns_and_values():
     assert row["term"] == "ST"
 
 
+def test_normalize_broker_export_records_handles_realized_activity_schema():
+    df = pd.DataFrame(
+        [
+            {
+                "Buy/Sell": "BUY",
+                "Symbol": "MARA",
+                "Description": "MARA HOLDINGS INC",
+                "Trade Date": "01/03/2024",
+                "Unit Price": "35.0",
+                "Quantity": "1000",
+                "Total Cost": "24670.51",
+                "Short Term Gain/Loss": "",
+                "Long Term Gain/Loss": "",
+                "Long/Short Position": "LONG",
+                "Disallowed Loss": "0.0",
+            },
+            {
+                "Buy/Sell": "SELL",
+                "Symbol": "MARA",
+                "Description": "MARA HOLDINGS INC",
+                "Trade Date": "01/10/2025",
+                "Unit Price": "45.0",
+                "Quantity": "-10",
+                "Total Cost": "450.00",
+                "Short Term Gain/Loss": "50.0",
+                "Long Term Gain/Loss": "0.0",
+                "Long/Short Position": "SHORT",
+                "Disallowed Loss": "0.0",
+            },
+        ]
+    )
+
+    rows, issues = normalize_broker_export_records(df, mapping=None, broker="B1")
+
+    assert issues == []
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["symbol"] == "MARA"
+    assert row["date_sold"] == date(2025, 1, 10)
+    assert row["term"] == "ST"
+    assert row["proceeds"] == 450.0
+    assert row["gain_or_loss"] == 50.0
+    assert row["cost_basis"] == 400.0
+
+
 def test_validate_broker_export_mapping_resolves_normalized_source_column_names():
     mapping = {
         "version": 1,

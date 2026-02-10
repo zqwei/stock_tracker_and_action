@@ -40,14 +40,15 @@ _FIELD_ALIASES = {
     "description": ["description", "security", "name"],
     "symbol": ["symbol", "ticker", "underlying"],
     "date_acquired": ["date acquired", "acquired date", "purchase date", "open date"],
-    "date_sold": ["date sold", "sale date", "close date", "disposed date"],
-    "proceeds": ["proceeds", "sell amount", "sales proceeds"],
-    "cost_basis": ["cost basis", "basis", "cost", "purchase amount"],
+    "date_sold": ["date sold", "sale date", "close date", "disposed date", "trade date"],
+    "proceeds": ["proceeds", "sell amount", "sales proceeds", "total cost", "unit price"],
+    "cost_basis": ["cost basis", "basis", "cost", "purchase amount", "total cost"],
     "wash_sale_disallowed": [
         "wash sale disallowed",
         "wash sale",
         "wash adjustment",
         "wash disallowed",
+        "disallowed loss",
     ],
     "gain_or_loss": ["gain/loss", "gain loss", "gain", "profit/loss", "pnl"],
     "term": ["term", "holding period", "st/lt", "short/long"],
@@ -110,6 +111,14 @@ _DEFAULT_DATE_FORMATS = [
     "%m/%d/%y",
     "%Y-%m-%d",
 ]
+
+
+_REALIZED_ACTIVITY_REQUIRED_KEYS = {
+    "buy/sell",
+    "trade date",
+    "quantity",
+    "total cost",
+}
 
 
 @dataclass(frozen=True)
@@ -208,6 +217,95 @@ def infer_broker_export_column_map(columns: list[str]) -> dict[str, str]:
 
 def infer_broker_tax_column_map(columns: list[str]) -> dict[str, str]:
     return infer_broker_export_column_map(columns)
+
+
+def _looks_like_realized_activity_export(columns: list[str]) -> bool:
+    normalized = {_normalize(column) for column in columns}
+    if not _REALIZED_ACTIVITY_REQUIRED_KEYS.issubset(normalized):
+        return False
+    return any(
+        key in normalized
+        for key in {"short term gain/loss", "long term gain/loss", "gain/loss"}
+    )
+
+
+def _normalize_realized_activity_export(
+    df: pd.DataFrame,
+    *,
+    broker: str,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    columns = list(df.columns)
+    normalized_to_original = {_normalize(str(column)): str(column) for column in columns}
+
+    def _col(name: str) -> str | None:
+        return normalized_to_original.get(name)
+
+    side_col = _col("buy/sell")
+    trade_date_col = _col("trade date")
+    symbol_col = _col("symbol")
+    description_col = _col("description")
+    quantity_col = _col("quantity")
+    unit_price_col = _col("unit price")
+    total_cost_col = _col("total cost")
+    st_gain_col = _col("short term gain/loss")
+    lt_gain_col = _col("long term gain/loss")
+    gain_col = _col("gain/loss")
+    term_col = _col("long/short position")
+    disallowed_col = _col("disallowed loss") or _col("wash sale")
+
+    rows: list[dict[str, Any]] = []
+    issues: list[str] = []
+
+    for row_number, row_data in enumerate(df.to_dict(orient="records"), start=1):
+        side = str(row_data.get(side_col or "", "")).strip().upper()
+        if side != "SELL":
+            continue
+
+        date_sold = _parse_date(row_data.get(trade_date_col or ""), _DEFAULT_DATE_FORMATS)
+        quantity = parse_float(row_data.get(quantity_col or ""), default=None)
+        unit_price = parse_float(row_data.get(unit_price_col or ""), default=None)
+        total_cost = parse_float(row_data.get(total_cost_col or ""), default=None)
+        short_gain = parse_float(row_data.get(st_gain_col or ""), default=0.0) or 0.0
+        long_gain = parse_float(row_data.get(lt_gain_col or ""), default=0.0) or 0.0
+        direct_gain = parse_float(row_data.get(gain_col or ""), default=None)
+        gain_or_loss = direct_gain if direct_gain is not None else (short_gain + long_gain)
+
+        proceeds: float | None = None
+        if quantity not in (None, 0) and unit_price not in (None, 0):
+            proceeds = abs(float(quantity) * float(unit_price))
+        elif total_cost is not None:
+            proceeds = abs(float(total_cost))
+
+        cost_basis = (
+            (proceeds - gain_or_loss) if (proceeds is not None and gain_or_loss is not None) else None
+        )
+        term = normalize_term(row_data.get(term_col or "")) or "UNKNOWN"
+        wash_sale_disallowed = parse_float(row_data.get(disallowed_col or ""), default=0.0) or 0.0
+
+        if date_sold is None:
+            issues.append(f"Row {row_number}: invalid trade date")
+            continue
+        if proceeds is None or cost_basis is None:
+            issues.append(f"Row {row_number}: could not derive proceeds/cost basis from realized export")
+            continue
+
+        rows.append(
+            {
+                "description": str(row_data.get(description_col or "", "")).strip() or None,
+                "symbol": str(row_data.get(symbol_col or "", "")).strip().upper() or None,
+                "date_acquired": None,
+                "date_sold": date_sold,
+                "proceeds": float(proceeds),
+                "cost_basis": float(cost_basis),
+                "wash_sale_disallowed": float(wash_sale_disallowed),
+                "gain_or_loss": float(gain_or_loss or 0.0),
+                "term": term,
+                "currency": "USD",
+                "broker": broker,
+            }
+        )
+
+    return rows, issues
 
 
 def _mapping_is_schema(mapping: dict[str, Any]) -> bool:
@@ -603,6 +701,13 @@ def normalize_broker_export_records(
     broker: str = "generic",
 ) -> tuple[list[dict[str, Any]], list[str]]:
     columns = [str(column) for column in df.columns]
+    if _looks_like_realized_activity_export(columns) and (
+        mapping is None or not _mapping_is_schema(mapping)
+    ):
+        realized_rows, realized_issues = _normalize_realized_activity_export(df, broker=broker)
+        if realized_rows:
+            return realized_rows, realized_issues
+
     if mapping is None:
         mapping = infer_broker_export_column_map(columns)
 

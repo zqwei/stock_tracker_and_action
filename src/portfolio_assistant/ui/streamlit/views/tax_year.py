@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from portfolio_assistant.analytics.reconciliation import validate_tax_report_summary
 from portfolio_assistant.analytics.tax_year_report import generate_tax_year_report
 from portfolio_assistant.ui.streamlit.views.common import (
+    apply_page_theme,
     csv_download,
     export_filename,
     initialize_engine,
@@ -93,6 +94,7 @@ def wash_sale_matches_dataframe(report: dict[str, Any]) -> pd.DataFrame:
 
 def render_page() -> None:
     st.set_page_config(page_title="Tax Year", layout="wide")
+    apply_page_theme()
     st.header("Tax Year")
     st.caption("Selected-year realized gain/loss report with broker vs IRS wash-sale modes.")
     st.info("Educational analytics only, not tax advice.")
@@ -180,4 +182,3 @@ def render_page() -> None:
                 filename=export_filename("tax_year_wash_matches", accounts, account_filter_id),
                 key="download_tax_year_wash_csv",
             )
-

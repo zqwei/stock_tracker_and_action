@@ -11,7 +11,6 @@ from portfolio_assistant.config.paths import PRIVATE_DIR
 
 TRADE_REQUIRED_FIELDS = [
     "executed_at",
-    "instrument_type",
     "side",
     "quantity",
     "price",
@@ -27,10 +26,12 @@ TRADE_CANONICAL_FIELDS = [
     "side",
     "quantity",
     "price",
+    "total_cost",
     "fees",
     "net_amount",
-    "currency",
     "option_symbol_raw",
+    "multiplier",
+    "currency",
 ]
 
 CASH_CANONICAL_FIELDS = [
@@ -44,28 +45,33 @@ CASH_CANONICAL_FIELDS = [
 BROKER_TEMPLATES = {
     "generic": {
         "trade_id": ["id", "order id", "trade id"],
-        "executed_at": ["date", "datetime", "time", "executed at"],
-        "instrument_type": ["instrument", "type", "asset type"],
+        "executed_at": ["trade date", "filled time", "date", "datetime", "time", "executed at"],
+        "instrument_type": ["instrument", "type", "asset type", "asset class"],
         "symbol": ["ticker", "symbol", "underlying"],
-        "side": ["side", "action"],
+        "side": ["buy/sell", "buy sell", "side", "action", "transaction type"],
         "quantity": ["qty", "quantity", "filled"],
-        "price": ["price", "avg price", "fill price"],
-        "fees": ["fee", "fees", "commission"],
+        "price": ["unit price", "price", "avg price", "average price", "fill price"],
+        "total_cost": ["total cost", "total amount", "gross amount"],
+        "fees": ["fee", "fees", "commission", "commission/fees", "charges"],
         "net_amount": ["amount", "net", "net amount"],
+        "multiplier": ["multiplier", "contract size", "contract multiplier"],
         "currency": ["currency", "ccy"],
         "option_symbol_raw": ["option symbol", "option_symbol_raw", "description"],
     },
     "webull": {
         "trade_id": ["order id", "id"],
-        "executed_at": ["filled time", "time", "date"],
-        "instrument_type": ["type"],
+        "executed_at": ["filled time", "trade date", "time", "date", "placed time"],
+        "instrument_type": ["type", "symbol", "name"],
         "symbol": ["symbol", "ticker"],
-        "side": ["side", "action"],
-        "quantity": ["filled", "quantity", "qty"],
-        "price": ["price", "avg price"],
-        "fees": ["fee", "fees", "commission"],
-        "net_amount": ["amount", "net amount"],
+        "side": ["buy/sell", "side", "action"],
+        "quantity": ["filled", "filled qty", "quantity", "qty", "total qty"],
+        "price": ["avg price", "unit price", "price", "fill price"],
+        "total_cost": ["total cost", "amount", "net amount"],
+        "fees": ["fee", "fees", "commission", "transaction fee"],
+        "net_amount": ["net amount", "amount"],
+        "multiplier": ["multiplier", "contract size"],
         "currency": ["currency"],
+        "option_symbol_raw": ["option symbol", "option_symbol_raw"],
     },
 }
 
@@ -106,8 +112,33 @@ def _infer_with_template(
 
 
 def infer_trade_column_map(columns: list[str], broker: str = "generic") -> dict[str, str]:
-    template = BROKER_TEMPLATES.get(broker.lower(), BROKER_TEMPLATES["generic"])
-    return _infer_with_template(columns, template=template)
+    broker_key = broker.lower()
+    template = BROKER_TEMPLATES.get(broker_key, BROKER_TEMPLATES["generic"])
+    mapping = _infer_with_template(columns, template=template)
+
+    if broker_key == "webull":
+        normalized_to_original = {_normalize(column): column for column in columns}
+
+        if "filled time" in normalized_to_original:
+            mapping["executed_at"] = normalized_to_original["filled time"]
+        elif "placed time" in normalized_to_original:
+            mapping["executed_at"] = normalized_to_original["placed time"]
+
+        if "filled" in normalized_to_original:
+            mapping["quantity"] = normalized_to_original["filled"]
+        elif "total qty" in normalized_to_original:
+            mapping["quantity"] = normalized_to_original["total qty"]
+
+        if "avg price" in normalized_to_original:
+            mapping["price"] = normalized_to_original["avg price"]
+
+        if "type" not in normalized_to_original:
+            if "name" in normalized_to_original:
+                mapping["instrument_type"] = normalized_to_original["name"]
+            elif "symbol" in normalized_to_original and "symbol" not in mapping:
+                mapping["instrument_type"] = normalized_to_original["symbol"]
+
+    return mapping
 
 
 def infer_cash_column_map(columns: list[str], broker: str = "generic") -> dict[str, str]:
@@ -118,6 +149,65 @@ def infer_cash_column_map(columns: list[str], broker: str = "generic") -> dict[s
 def infer_column_map(columns: list[str], broker: str = "generic") -> dict[str, str]:
     # Backward compatible alias used by earlier code for trade imports.
     return infer_trade_column_map(columns, broker=broker)
+
+
+TRADE_FIELD_HELP: dict[str, str] = {
+    "trade_id": "Optional broker order/trade id used for traceability and de-dupe.",
+    "executed_at": "Trade Date / Filled Time. Prefer execution/fill time over order submission time.",
+    "instrument_type": "Stock or Option. Optional if the file is single-type or options can be inferred.",
+    "symbol": "Ticker or underlying symbol.",
+    "side": "Buy/Sell for stock. Option files can also use BTO/STO/BTC/STC.",
+    "quantity": "Filled quantity/contracts (not total order quantity when partially filled).",
+    "price": "Unit price per share/contract (prefer average fill price).",
+    "total_cost": "Optional total trade amount from broker export; can be used to estimate fees.",
+    "fees": "Optional commission/fees. If missing, app can estimate from Total Cost and Unit Price.",
+    "net_amount": "Signed cash impact. Can be auto-computed if missing.",
+    "option_symbol_raw": "Optional raw OCC option symbol (for expiry/strike parsing). Leave blank for stock files.",
+    "multiplier": "Contract multiplier (usually 100 for US equity options).",
+    "currency": "Optional. If omitted, imports default to USD.",
+}
+
+CASH_FIELD_HELP: dict[str, str] = {
+    "posted_at": "Cash posting timestamp (use settlement or posted date when available).",
+    "activity_type": "Deposit, withdrawal, dividend, interest, fee, transfer, or similar cash activity.",
+    "amount": "Positive cash amount in account currency for the row.",
+    "description": "Broker memo/details shown for this cash activity.",
+    "source": "Funding source/channel such as ACH, wire, journal, or internal transfer.",
+}
+
+
+def trade_mapping_hints(columns: list[str], broker: str = "generic") -> list[str]:
+    normalized = {_normalize(column) for column in columns}
+    hints: list[str] = []
+
+    if broker.strip().lower() == "webull":
+        if "filled" in normalized and "total qty" in normalized:
+            hints.append("Use `Filled` for quantity; `Total Qty` includes unfilled size.")
+        if "filled time" in normalized and "placed time" in normalized:
+            hints.append(
+                "Use `Filled Time` for Trade Date / Filled Time; `Placed Time` is order submission time."
+            )
+        if "avg price" in normalized and "price" in normalized:
+            hints.append("Use `Avg Price` for execution price; `Price` can be the limit quote.")
+        if "unit price" in normalized:
+            hints.append("`Unit Price` maps to Unit Price.")
+        if "status" in normalized:
+            hints.append("Rows with cancelled/rejected status often have zero filled qty and will be skipped.")
+        if "type" not in normalized and "symbol" in normalized:
+            hints.append(
+                "No explicit `Type` detected: use default instrument type in UI or infer options from OCC symbols."
+            )
+
+    if "price" in normalized and "avg price" in normalized:
+        hints.append("When both `Price` and `Avg Price` exist, average fill price is usually safer for P&L.")
+    if "trade date" in normalized and "filled time" not in normalized:
+        hints.append(
+            "`Trade Date` is acceptable for Trade Date / Filled Time when filled time is unavailable."
+        )
+    if "total cost" in normalized:
+        hints.append("Map `Total Cost` if you want automatic fee estimation when fee column is missing.")
+
+    return hints
 
 
 def missing_required_fields(

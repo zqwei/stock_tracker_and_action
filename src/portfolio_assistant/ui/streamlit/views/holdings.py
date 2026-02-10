@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from portfolio_assistant.db.models import Account, PositionOpen
 from portfolio_assistant.ui.streamlit.views.common import (
     account_label,
+    apply_page_theme,
     csv_download,
     export_filename,
     initialize_engine,
@@ -118,6 +119,7 @@ def holdings_summary(frame: pd.DataFrame) -> dict[str, float]:
 
 def render_page() -> None:
     st.set_page_config(page_title="Holdings", layout="wide")
+    apply_page_theme()
     st.header("Holdings")
     st.caption("Open positions for the selected global account scope.")
 
@@ -148,4 +150,3 @@ def render_page() -> None:
         filename=export_filename("holdings", accounts, account_filter_id),
         key="download_holdings_csv",
     )
-

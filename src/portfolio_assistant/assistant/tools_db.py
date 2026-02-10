@@ -14,8 +14,10 @@ from portfolio_assistant.db.models import (
     PnlRealized,
     PositionOpen,
     PriceCache,
+    ReconciliationRun,
     TradeNormalized,
     TradeRaw,
+    WashSaleAdjustment,
 )
 from portfolio_assistant.ingest.dedupe import cash_dedupe_key, raw_row_hash, trade_dedupe_key
 
@@ -54,6 +56,47 @@ def list_accounts(session: Session) -> list[Account]:
     return list(
         session.scalars(select(Account).order_by(Account.broker, Account.account_label)).all()
     )
+
+
+def delete_account_if_empty(session: Session, account_id: str) -> tuple[bool, str]:
+    account = session.get(Account, account_id)
+    if account is None:
+        return False, "Account not found."
+
+    checks = {
+        "trade imports": select(func.count()).select_from(TradeRaw).where(TradeRaw.account_id == account_id),
+        "normalized trades": select(func.count())
+        .select_from(TradeNormalized)
+        .where(TradeNormalized.account_id == account_id),
+        "cash rows": select(func.count())
+        .select_from(CashActivity)
+        .where(CashActivity.account_id == account_id),
+        "realized rows": select(func.count())
+        .select_from(PnlRealized)
+        .where(PnlRealized.account_id == account_id),
+        "open positions": select(func.count())
+        .select_from(PositionOpen)
+        .where(PositionOpen.account_id == account_id),
+        "reconciliation runs": select(func.count())
+        .select_from(ReconciliationRun)
+        .where(ReconciliationRun.account_id == account_id),
+        "wash-sale matches": select(func.count())
+        .select_from(WashSaleAdjustment)
+        .where(WashSaleAdjustment.replacement_account_id == account_id),
+    }
+    usage = {label: int(session.scalar(stmt) or 0) for label, stmt in checks.items()}
+    blocking = {label: count for label, count in usage.items() if count > 0}
+    if blocking:
+        summary = ", ".join(f"{label}={count}" for label, count in blocking.items())
+        return (
+            False,
+            "Cannot remove account because data exists. "
+            f"Delete dependent rows first ({summary}).",
+        )
+
+    session.delete(account)
+    session.flush()
+    return True, f"Removed account '{account.broker} | {account.account_label}'."
 
 
 def _chunked(rows: list[dict], batch_size: int) -> Iterable[list[dict]]:

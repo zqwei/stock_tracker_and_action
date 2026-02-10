@@ -8,10 +8,19 @@ import pytest
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
-from portfolio_assistant.assistant.tools_db import insert_cash_activity, insert_trade_import
+from portfolio_assistant.assistant.tools_db import (
+    delete_account_if_empty,
+    insert_cash_activity,
+    insert_trade_import,
+)
 from portfolio_assistant.db.models import Account, Base, CashActivity, TradeNormalized, TradeRaw
 from portfolio_assistant.ingest.csv_import import normalize_cash_records, normalize_trade_records
-from portfolio_assistant.ingest.csv_mapping import get_saved_trade_mapping, save_trade_mapping
+from portfolio_assistant.ingest.csv_mapping import (
+    get_saved_trade_mapping,
+    infer_trade_column_map,
+    save_trade_mapping,
+    trade_mapping_hints,
+)
 
 
 def _setup_account(session: Session) -> Account:
@@ -50,6 +59,73 @@ def test_normalize_trade_records_rejects_duplicate_source_mapping():
 
     assert rows == []
     assert any("multiple fields" in issue for issue in issues), issues
+
+
+def test_infer_trade_column_map_webull_prefers_filled_time_avg_price_and_filled_qty():
+    columns = [
+        "Name",
+        "Symbol",
+        "Side",
+        "Status",
+        "Filled",
+        "Total Qty",
+        "Price",
+        "Avg Price",
+        "Placed Time",
+        "Filled Time",
+    ]
+
+    mapping = infer_trade_column_map(columns, broker="webull")
+
+    assert mapping["executed_at"] == "Filled Time"
+    assert mapping["quantity"] == "Filled"
+    assert mapping["price"] == "Avg Price"
+    # Webull exports often omit explicit "Type"; this should still map required fields.
+    assert mapping["instrument_type"] in {"Symbol", "Name"}
+
+    hints = trade_mapping_hints(columns, broker="webull")
+    assert any("Filled Time" in hint for hint in hints)
+    assert any("Avg Price" in hint for hint in hints)
+
+
+def test_normalize_trade_records_handles_webull_option_symbol_and_timezone():
+    df = pd.DataFrame(
+        [
+            {
+                "Name": "TQQQ251121C00140000",
+                "Symbol": "TQQQ251121C00140000",
+                "Side": "Sell",
+                "Status": "Filled",
+                "Filled": "3",
+                "Total Qty": "3",
+                "Price": "@0.5200000000",
+                "Avg Price": "0.5200000000",
+                "Placed Time": "09/22/2025 09:45:29 EDT",
+                "Filled Time": "09/22/2025 09:46:31 EDT",
+            }
+        ]
+    )
+    mapping = infer_trade_column_map(list(df.columns), broker="webull")
+
+    rows, issues = normalize_trade_records(
+        df=df,
+        mapping=mapping,
+        account_id="acc-webull",
+        broker="webull",
+    )
+
+    assert issues == []
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["instrument_type"] == "OPTION"
+    assert row["symbol"] == "TQQQ"
+    assert row["underlying"] == "TQQQ"
+    assert row["call_put"] == "C"
+    assert row["strike"] == 140.0
+    assert row["quantity"] == 3.0
+    assert row["price"] == 0.52
+    assert row["option_symbol_raw"] == "TQQQ251121C00140000"
+    assert row["executed_at"].tzinfo is None
 
 
 def test_normalize_cash_records_requires_positive_amount():
@@ -126,9 +202,9 @@ def test_save_trade_mapping_requires_required_fields(tmp_path, monkeypatch):
         lambda: mapping_path,
     )
 
-    columns = ["Date", "Side", "Qty", "Price"]
+    columns = ["Type", "Side", "Qty", "Price"]
     missing_required = {
-        "executed_at": "Date",
+        "instrument_type": "Type",
         "side": "Side",
         "quantity": "Qty",
         "price": "Price",
@@ -140,7 +216,113 @@ def test_save_trade_mapping_requires_required_fields(tmp_path, monkeypatch):
             columns=columns,
             mapping=missing_required,
         )
-    assert "Missing required field mapping" in str(exc_info.value)
+    assert "Missing required field mapping 'executed_at'" in str(exc_info.value)
+
+
+def test_normalize_trade_records_uses_default_instrument_type_when_missing_column():
+    df = pd.DataFrame(
+        [
+            {
+                "Trade Date": "2025-01-05",
+                "Buy/Sell": "BUY",
+                "Quantity": "10",
+                "Unit Price": "25.50",
+                "Symbol": "AAPL",
+            }
+        ]
+    )
+    mapping = {
+        "executed_at": "Trade Date",
+        "side": "Buy/Sell",
+        "quantity": "Quantity",
+        "price": "Unit Price",
+        "symbol": "Symbol",
+    }
+
+    rows, issues = normalize_trade_records(
+        df=df,
+        mapping=mapping,
+        account_id="acc-1",
+        broker="generic",
+        default_instrument_type="STOCK",
+    )
+
+    assert issues == []
+    assert len(rows) == 1
+    assert rows[0]["instrument_type"] == "STOCK"
+    assert rows[0]["side"] == "BUY"
+    assert rows[0]["price"] == 25.50
+
+
+def test_normalize_trade_records_infers_fees_from_total_cost_for_options():
+    df = pd.DataFrame(
+        [
+            {
+                "Trade Date": "2025-01-10",
+                "Buy/Sell": "BUY",
+                "Quantity": "1",
+                "Unit Price": "2.50",
+                "Total Cost": "255.00",
+                "Option Symbol": "AAPL250117C00150000",
+            }
+        ]
+    )
+    mapping = {
+        "executed_at": "Trade Date",
+        "side": "Buy/Sell",
+        "quantity": "Quantity",
+        "price": "Unit Price",
+        "total_cost": "Total Cost",
+        "option_symbol_raw": "Option Symbol",
+    }
+
+    rows, issues = normalize_trade_records(
+        df=df,
+        mapping=mapping,
+        account_id="acc-opt",
+        broker="generic",
+    )
+
+    assert issues == []
+    assert len(rows) == 1
+    assert rows[0]["instrument_type"] == "OPTION"
+    assert rows[0]["fees"] == pytest.approx(5.0, rel=1e-9)
+    assert rows[0]["net_amount"] == pytest.approx(-255.0, rel=1e-9)
+
+
+def test_normalize_trade_records_does_not_force_option_from_non_option_raw_symbol():
+    df = pd.DataFrame(
+        [
+            {
+                "Trade Date": "2025-01-10",
+                "Buy/Sell": "SELL",
+                "Quantity": "2",
+                "Unit Price": "100",
+                "Symbol": "MSFT",
+                "Option Raw": "MSFT",
+            }
+        ]
+    )
+    mapping = {
+        "executed_at": "Trade Date",
+        "side": "Buy/Sell",
+        "quantity": "Quantity",
+        "price": "Unit Price",
+        "symbol": "Symbol",
+        "option_symbol_raw": "Option Raw",
+    }
+
+    rows, issues = normalize_trade_records(
+        df=df,
+        mapping=mapping,
+        account_id="acc-stock",
+        broker="generic",
+    )
+
+    assert issues == []
+    assert len(rows) == 1
+    assert rows[0]["instrument_type"] == "STOCK"
+    assert rows[0]["side"] == "SELL"
 
 
 def test_save_trade_mapping_normalizes_column_name_matching(tmp_path, monkeypatch):
@@ -374,3 +556,56 @@ def test_insert_cash_activity_dedupes_duplicate_rows_within_same_batch():
         inserted = insert_cash_activity(session, [row, row])
         assert inserted == 1
         assert session.scalar(select(func.count()).select_from(CashActivity)) == 1
+
+
+def test_delete_account_if_empty_removes_account_without_dependencies():
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        account = _setup_account(session)
+        account_id = account.id
+        ok, message = delete_account_if_empty(session, account_id)
+        session.commit()
+
+        assert ok is True
+        assert "Removed account" in message
+        assert session.get(Account, account_id) is None
+
+
+def test_delete_account_if_empty_blocks_when_trade_data_exists():
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        account = _setup_account(session)
+        session.add(
+            TradeNormalized(
+                account_id=account.id,
+                broker="B1",
+                trade_id="T-1",
+                executed_at=datetime(2025, 1, 3, 10, 0, 0),
+                instrument_type="STOCK",
+                symbol="AAPL",
+                side="BUY",
+                option_symbol_raw=None,
+                underlying=None,
+                expiration=None,
+                strike=None,
+                call_put=None,
+                multiplier=1,
+                quantity=1.0,
+                price=100.0,
+                fees=0.0,
+                net_amount=-100.0,
+                currency="USD",
+            )
+        )
+        session.flush()
+
+        ok, message = delete_account_if_empty(session, account.id)
+        session.rollback()
+
+        assert ok is False
+        assert "Cannot remove account" in message
+        assert "normalized trades" in message

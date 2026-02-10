@@ -38,6 +38,7 @@ from portfolio_assistant.assistant.daily_briefing import (
 )
 from portfolio_assistant.assistant.tools_db import (
     create_account,
+    delete_account_if_empty,
     get_engine,
     insert_cash_activity,
     insert_trade_import,
@@ -61,14 +62,18 @@ from portfolio_assistant.ingest.csv_import import (
 )
 from portfolio_assistant.ingest.csv_mapping import (
     CASH_CANONICAL_FIELDS,
+    CASH_FIELD_HELP,
     CASH_REQUIRED_FIELDS,
     TRADE_CANONICAL_FIELDS,
+    TRADE_FIELD_HELP,
     TRADE_REQUIRED_FIELDS,
     get_saved_trade_mapping,
     missing_required_fields,
     save_trade_mapping,
+    trade_mapping_hints,
 )
 from portfolio_assistant.ingest.validators import parse_datetime
+from portfolio_assistant.ui.streamlit.theme import apply_futuristic_theme, render_theme_selector
 from portfolio_assistant.utils.money import format_money, format_percent
 
 try:
@@ -87,6 +92,29 @@ CORE_NAV_ITEMS = [
     "Wash Sale Risk",
     "Data Quality",
 ]
+
+TRADE_MAPPING_HIDDEN_FIELDS = {"currency"}
+
+FIELD_DISPLAY_NAMES = {
+    "trade_id": "Trade ID",
+    "executed_at": "Trade Date / Filled Time",
+    "instrument_type": "Instrument Type (Stock/Option)",
+    "symbol": "Symbol",
+    "side": "Buy/Sell",
+    "quantity": "Filled Quantity",
+    "price": "Unit Price",
+    "total_cost": "Total Cost (Optional)",
+    "fees": "Fees (Optional)",
+    "net_amount": "Net Amount (Optional)",
+    "option_symbol_raw": "Option Symbol Raw (Optional)",
+    "multiplier": "Option Multiplier (Optional)",
+    "currency": "Currency (Auto USD)",
+    "posted_at": "Posted Date / Time",
+    "activity_type": "Activity Type",
+    "amount": "Amount",
+    "description": "Description",
+    "source": "Source",
+}
 
 
 def _nav_items() -> list[str]:
@@ -123,6 +151,15 @@ def _safe_key(value: str) -> str:
     return "".join(ch if ch.isalnum() else "_" for ch in value.lower())
 
 
+def _mapping_display_name(field: str) -> str:
+    return FIELD_DISPLAY_NAMES.get(field, field.replace("_", " ").strip().title())
+
+
+def _mapping_field_label(field: str, *, required: bool) -> str:
+    suffix = " *" if required else ""
+    return f"{_mapping_display_name(field)}{suffix}"
+
+
 def _account_label(account: Account) -> str:
     return f"{account.broker} | {account.account_label} | {account.account_type.value}"
 
@@ -132,11 +169,15 @@ def _account_lookup(accounts: list[Account]) -> dict[str, Account]:
 
 
 def _set_nav_page(page: str) -> None:
-    st.session_state["nav_item"] = page
+    st.session_state["pending_nav_item"] = page
     st.rerun()
 
 
 def _render_sidebar(accounts: list[Account], nav_items: list[str]) -> tuple[str, str | None]:
+    pending_nav = st.session_state.pop("pending_nav_item", None)
+    if pending_nav in set(nav_items):
+        st.session_state["nav_item"] = pending_nav
+
     if "nav_item" not in st.session_state or st.session_state.get("nav_item") not in set(
         nav_items
     ):
@@ -151,7 +192,10 @@ def _render_sidebar(accounts: list[Account], nav_items: list[str]) -> tuple[str,
 
     with st.sidebar:
         st.title("Portfolio Assistant")
-        nav = st.radio("Navigate", nav_items, key="nav_item")
+        render_theme_selector()
+        st.caption("One workflow for imports, analytics, and risk checks.")
+        st.markdown("**Workflow**")
+        nav = st.radio("Navigate", nav_items, key="nav_item", label_visibility="collapsed")
 
         account_filter_id = st.selectbox(
             "Global account filter",
@@ -163,7 +207,7 @@ def _render_sidebar(accounts: list[Account], nav_items: list[str]) -> tuple[str,
             ),
             key=filter_state_key,
         )
-        st.caption("Phase 1 MVP")
+        st.caption("This scope is shared across report pages.")
 
     return nav, account_filter_id
 
@@ -270,25 +314,36 @@ def _render_mapping_inputs(
     mapping_seed: dict[str, str],
     canonical_fields: list[str],
     required_fields: list[str],
+    field_help: dict[str, str] | None = None,
+    hidden_fields: set[str] | None = None,
     key_prefix: str,
 ) -> tuple[dict[str, str], list[str]]:
     options = ["--"] + columns
+    field_help = field_help or {}
+    hidden_fields = hidden_fields or set()
     required_set = set(required_fields)
-    required_order = [field for field in canonical_fields if field in required_set]
-    optional_order = [field for field in canonical_fields if field not in required_set]
+    required_order = [
+        field for field in canonical_fields if field in required_set and field not in hidden_fields
+    ]
+    optional_order = [
+        field for field in canonical_fields if field not in required_set and field not in hidden_fields
+    ]
 
     current_mapping: dict[str, str] = {}
 
     st.markdown("**Required fields**")
+    st.caption("* Required field")
     required_cols = st.columns(2)
     for idx, canonical in enumerate(required_order):
         default_col = mapping_seed.get(canonical, "--")
         default_idx = options.index(default_col) if default_col in options else 0
+        help_text = field_help.get(canonical, "")
         selected = required_cols[idx % 2].selectbox(
-            canonical,
+            _mapping_field_label(canonical, required=True),
             options=options,
             index=default_idx,
             key=f"{key_prefix}_required_{canonical}",
+            help=help_text,
         )
         if selected != "--":
             current_mapping[canonical] = selected
@@ -299,11 +354,13 @@ def _render_mapping_inputs(
             for idx, canonical in enumerate(optional_order):
                 default_col = mapping_seed.get(canonical, "--")
                 default_idx = options.index(default_col) if default_col in options else 0
+                help_text = field_help.get(canonical, "")
                 selected = optional_cols[idx % 2].selectbox(
-                    canonical,
+                    _mapping_field_label(canonical, required=False),
                     options=options,
                     index=default_idx,
                     key=f"{key_prefix}_optional_{canonical}",
+                    help=help_text,
                 )
                 if selected != "--":
                     current_mapping[canonical] = selected
@@ -318,7 +375,8 @@ def _render_mapping_inputs(
     m3.metric("Detected CSV columns", len(columns))
 
     if missing:
-        st.error(f"Missing required mappings: {', '.join(missing)}")
+        missing_text = ", ".join(_mapping_display_name(field) for field in missing)
+        st.error(f"Missing required mappings: {missing_text}")
     else:
         st.success("Required mappings are complete.")
 
@@ -390,6 +448,32 @@ def _render_accounts(engine, accounts: list[Account]) -> None:
         for account in accounts
     ]
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.caption("To remove an account, it must not have imported trades/cash/analytics records.")
+
+    with st.expander("Remove account", expanded=False):
+        account_lookup = {account.id: _account_label(account) for account in accounts}
+        account_to_remove = st.selectbox(
+            "Account to remove",
+            options=list(account_lookup.keys()),
+            format_func=lambda account_id: account_lookup[account_id],
+            key="remove_account_id",
+        )
+        confirm_remove = st.checkbox(
+            "I understand this only works for accounts without imported data.",
+            key="confirm_remove_account",
+        )
+        if st.button("Remove selected account", key="remove_account_btn", disabled=not confirm_remove):
+            with Session(engine) as session:
+                ok, message = delete_account_if_empty(session, account_to_remove)
+                if ok:
+                    session.commit()
+                    if st.session_state.get("global_account_filter_id") == account_to_remove:
+                        st.session_state["global_account_filter_id"] = None
+                    st.success(message)
+                    st.rerun()
+                else:
+                    session.rollback()
+                    st.error(message)
 
     if st.button("Next: Import Trades", key="accounts_next_to_import_trades"):
         _set_nav_page("Import Trades")
@@ -455,6 +539,24 @@ def _render_import_trades(
 
     st.subheader("Column Mapping")
     st.caption("Map required fields first. Optional fields are collapsed by default.")
+    st.caption("Hover the info icon on each field for friendly mapping guidance.")
+
+    hints = trade_mapping_hints(preview.columns, broker=broker)
+    with st.expander("Mapping guide", expanded=bool(hints)):
+        st.caption("Canonical fields and practical guidance for cleaner imports.")
+        guide_rows = [
+            {
+                "field": _mapping_display_name(field),
+                "description": TRADE_FIELD_HELP.get(field, ""),
+            }
+            for field in TRADE_CANONICAL_FIELDS
+            if field not in TRADE_MAPPING_HIDDEN_FIELDS
+        ]
+        st.dataframe(pd.DataFrame(guide_rows), use_container_width=True, hide_index=True)
+        if hints:
+            st.markdown("**Detected hints for this file**")
+            for hint in hints:
+                st.markdown(f"- {hint}")
 
     mapping_seed = saved_mapping or preview.mapping
     mapping_key = f"trade_map_{_safe_key(broker)}_{preview.signature[:10]}"
@@ -463,8 +565,26 @@ def _render_import_trades(
         mapping_seed=mapping_seed,
         canonical_fields=TRADE_CANONICAL_FIELDS,
         required_fields=TRADE_REQUIRED_FIELDS,
+        field_help=TRADE_FIELD_HELP,
+        hidden_fields=TRADE_MAPPING_HIDDEN_FIELDS,
         key_prefix=mapping_key,
     )
+
+    default_instrument_type: str | None = None
+    if "instrument_type" not in current_mapping:
+        default_choice = st.selectbox(
+            "Default instrument type (when file has no type column)",
+            options=["Auto detect", "Stock", "Option"],
+            help=(
+                "Use this when your CSV is stock-only or option-only and has no Instrument Type column. "
+                "Auto detect infers from OCC option symbols and option-style sides (BTO/STO/BTC/STC)."
+            ),
+            key=f"{mapping_key}_default_instrument_type",
+        )
+        if default_choice == "Stock":
+            default_instrument_type = "STOCK"
+        elif default_choice == "Option":
+            default_instrument_type = "OPTION"
 
     normalized_rows: list[dict] = []
     issues: list[str] = []
@@ -474,6 +594,7 @@ def _render_import_trades(
             mapping=current_mapping,
             account_id=account.id,
             broker=broker,
+            default_instrument_type=default_instrument_type,
         )
 
     _render_row_issues(issues, "trade row issues")
@@ -616,12 +737,24 @@ def _render_import_cash(
         st.dataframe(df.head(20), use_container_width=True, hide_index=True)
 
     st.subheader("Column Mapping")
+    st.caption("Hover the info icon on each field for friendly mapping guidance.")
+    with st.expander("Mapping guide", expanded=False):
+        guide_rows = [
+            {
+                "field": _mapping_display_name(field),
+                "description": CASH_FIELD_HELP.get(field, ""),
+            }
+            for field in CASH_CANONICAL_FIELDS
+        ]
+        st.dataframe(pd.DataFrame(guide_rows), use_container_width=True, hide_index=True)
+
     mapping_key = f"cash_map_{_safe_key(broker)}_{preview.signature[:10]}"
     current_mapping, missing = _render_mapping_inputs(
         columns=preview.columns,
         mapping_seed=preview.mapping,
         canonical_fields=CASH_CANONICAL_FIELDS,
         required_fields=CASH_REQUIRED_FIELDS,
+        field_help=CASH_FIELD_HELP,
         key_prefix=mapping_key,
     )
 
@@ -1453,6 +1586,7 @@ def _render_daily_briefings(engine, account_filter_id: str | None) -> None:
 
 def main() -> None:
     st.set_page_config(page_title="Portfolio Assistant", layout="wide")
+    apply_futuristic_theme()
     engine = _initialize_app_engine()
     accounts = _load_accounts(engine)
     nav_items = _nav_items()

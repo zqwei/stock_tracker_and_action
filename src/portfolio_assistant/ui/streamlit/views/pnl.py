@@ -12,6 +12,7 @@ from portfolio_assistant.analytics.reconciliation import realized_by_symbol
 from portfolio_assistant.db.models import Account, PnlRealized
 from portfolio_assistant.ui.streamlit.views.common import (
     account_label,
+    apply_page_theme,
     csv_download,
     export_filename,
     initialize_engine,
@@ -115,6 +116,7 @@ def _instrument_slice(frame: pd.DataFrame, instrument: str) -> pd.DataFrame:
 
 def render_page() -> None:
     st.set_page_config(page_title="P&L", layout="wide")
+    apply_page_theme()
     st.header("P&L")
     st.caption("Realized P&L tables for the selected global account scope.")
 
@@ -176,4 +178,3 @@ def render_page() -> None:
             filename=export_filename("pnl_realized_rows", accounts, account_filter_id),
             key="download_pnl_detail_csv",
         )
-

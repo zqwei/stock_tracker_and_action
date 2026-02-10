@@ -1,0 +1,433 @@
+from __future__ import annotations
+
+import streamlit as st
+
+UI_THEME_SESSION_KEY = "ui_theme_preset"
+DEFAULT_THEME_PRESET = "deep_dark"
+
+THEME_PRESETS: dict[str, dict[str, str]] = {
+    "bright": {
+        "bg_0": "#f8fbff",
+        "bg_1": "#edf5ff",
+        "bg_2": "#e2ecfb",
+        "surface": "rgba(255, 255, 255, 0.97)",
+        "sidebar_bg": "rgba(241, 247, 255, 0.98)",
+        "header_bg": "rgba(248, 252, 255, 0.96)",
+        "border": "rgba(53, 93, 132, 0.30)",
+        "border_strong": "rgba(16, 115, 234, 0.72)",
+        "text_strong": "#0a2137",
+        "text": "#153654",
+        "text_muted": "#365a7b",
+        "accent": "#1073ea",
+        "accent_2": "#00a88f",
+        "glow_1": "rgba(16, 115, 234, 0.14)",
+        "glow_2": "rgba(0, 168, 143, 0.12)",
+        "elev_shadow": "rgba(18, 42, 66, 0.12)",
+        "button_bg": "#edf4ff",
+        "button_bg_hover": "#e0ecff",
+        "button_border": "#4b8ee0",
+        "button_text": "#0f2f4d",
+        "button_shadow": "rgba(34, 82, 126, 0.14)",
+    },
+    "dark": {
+        "bg_0": "#0b131d",
+        "bg_1": "#121f2e",
+        "bg_2": "#17293d",
+        "surface": "rgba(25, 40, 57, 0.9)",
+        "sidebar_bg": "rgba(11, 18, 28, 0.95)",
+        "header_bg": "rgba(11, 18, 28, 0.92)",
+        "border": "rgba(148, 184, 212, 0.3)",
+        "border_strong": "rgba(86, 236, 184, 0.62)",
+        "text_strong": "#f2fbff",
+        "text": "#d2e4f3",
+        "text_muted": "#9fb8cd",
+        "accent": "#56ecb8",
+        "accent_2": "#30c8ff",
+        "glow_1": "rgba(48, 200, 255, 0.16)",
+        "glow_2": "rgba(86, 236, 184, 0.14)",
+        "elev_shadow": "rgba(0, 0, 0, 0.42)",
+        "button_bg": "#163446",
+        "button_bg_hover": "#1d435a",
+        "button_border": "#2ea7d5",
+        "button_text": "#e8f5ff",
+        "button_shadow": "rgba(0, 0, 0, 0.34)",
+    },
+    "deep_dark": {
+        "bg_0": "#000000",
+        "bg_1": "#000000",
+        "bg_2": "#000000",
+        "surface": "rgba(12, 12, 12, 0.94)",
+        "sidebar_bg": "rgba(0, 0, 0, 0.98)",
+        "header_bg": "rgba(0, 0, 0, 0.96)",
+        "border": "rgba(120, 128, 143, 0.32)",
+        "border_strong": "rgba(78, 225, 255, 0.72)",
+        "text_strong": "#f8fbff",
+        "text": "#d9e2f0",
+        "text_muted": "#9aa8bc",
+        "accent": "#4ee1ff",
+        "accent_2": "#78f4c4",
+        "glow_1": "rgba(0, 0, 0, 0.0)",
+        "glow_2": "rgba(0, 0, 0, 0.0)",
+        "elev_shadow": "rgba(0, 0, 0, 0.74)",
+        "button_bg": "#000000",
+        "button_bg_hover": "#060606",
+        "button_border": "#2f9fc7",
+        "button_text": "#eaf6ff",
+        "button_shadow": "rgba(0, 0, 0, 0.7)",
+    },
+    "palenight": {
+        "bg_0": "#171726",
+        "bg_1": "#21213a",
+        "bg_2": "#2d2e4a",
+        "surface": "rgba(40, 43, 72, 0.86)",
+        "sidebar_bg": "rgba(22, 24, 42, 0.95)",
+        "header_bg": "rgba(22, 24, 42, 0.92)",
+        "border": "rgba(185, 176, 232, 0.32)",
+        "border_strong": "rgba(176, 139, 255, 0.72)",
+        "text_strong": "#f6f3ff",
+        "text": "#e5deff",
+        "text_muted": "#b7abd9",
+        "accent": "#b08bff",
+        "accent_2": "#78d2ff",
+        "glow_1": "rgba(120, 210, 255, 0.16)",
+        "glow_2": "rgba(176, 139, 255, 0.16)",
+        "elev_shadow": "rgba(6, 8, 22, 0.52)",
+        "button_bg": "#303555",
+        "button_bg_hover": "#3a4066",
+        "button_border": "#9a7eff",
+        "button_text": "#f2ebff",
+        "button_shadow": "rgba(11, 13, 36, 0.4)",
+    },
+}
+
+THEME_LABELS = {
+    "bright": "Bright",
+    "dark": "Dark",
+    "deep_dark": "Deep Dark",
+    "palenight": "Palenight",
+}
+
+THEME_CSS_TEMPLATE = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+:root {
+__ROOT_VARS__
+  --pa-danger: #ff8e7b;
+}
+
+.stApp {
+  font-family: "Manrope", "Avenir Next", "Segoe UI", sans-serif;
+  color: var(--pa-text);
+  background:
+    radial-gradient(circle at 18% 4%, var(--pa-glow_1), transparent 36%),
+    radial-gradient(circle at 84% 0%, var(--pa-glow_2), transparent 34%),
+    linear-gradient(160deg, var(--pa-bg_0) 0%, var(--pa-bg_1) 52%, var(--pa-bg_2) 100%);
+}
+
+[data-testid="stAppViewContainer"] > .main {
+  animation: pa-fade-up 380ms ease-out;
+}
+
+[data-testid="stAppViewContainer"] > .main .block-container {
+  padding-top: 1.2rem;
+  padding-bottom: 2rem;
+}
+
+[data-testid="stHeader"] {
+  background: var(--pa-header_bg) !important;
+  border-bottom: 1px solid color-mix(in oklab, var(--pa-border) 85%, transparent) !important;
+}
+
+[data-testid="stToolbar"] {
+  background: transparent !important;
+}
+
+[data-testid="stDecoration"] {
+  background: transparent !important;
+}
+
+[data-testid="stSidebar"] {
+  background: var(--pa-sidebar_bg);
+  border-right: 1px solid color-mix(in oklab, var(--pa-border) 82%, transparent);
+  box-shadow: inset -1px 0 0 color-mix(in oklab, var(--pa-border) 35%, transparent);
+}
+
+[data-testid="stSidebar"] .block-container {
+  padding-top: 1rem;
+}
+
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
+  color: var(--pa-text_muted);
+}
+
+[data-testid="stSidebarNav"] a {
+  color: var(--pa-text) !important;
+  border-radius: 12px !important;
+  border: 1px solid transparent !important;
+  margin: 1px 0 !important;
+  background: transparent !important;
+}
+
+[data-testid="stSidebarNav"] a:hover {
+  border-color: color-mix(in oklab, var(--pa-border) 75%, transparent) !important;
+  background: color-mix(in oklab, var(--pa-surface) 94%, var(--pa-bg_0)) !important;
+}
+
+[data-testid="stSidebarNav"] a[aria-current="page"] {
+  border-color: var(--pa-border_strong) !important;
+  background: color-mix(in oklab, var(--pa-accent) 20%, var(--pa-surface)) !important;
+}
+
+[data-testid="stSidebarNav"] a span {
+  color: var(--pa-text) !important;
+}
+
+[data-testid="stSidebarNav"] a[aria-current="page"] span {
+  color: var(--pa-text_strong) !important;
+  font-weight: 700 !important;
+}
+
+h1, h2, h3, h4 {
+  color: var(--pa-text_strong) !important;
+  letter-spacing: 0.01em;
+  font-weight: 700;
+}
+
+p, li, label {
+  color: var(--pa-text);
+}
+
+small, .stCaption {
+  color: var(--pa-text_muted) !important;
+}
+
+code, pre, kbd {
+  font-family: "IBM Plex Mono", "JetBrains Mono", monospace;
+}
+
+[data-testid="stSidebar"] [data-testid="stRadio"] > div {
+  gap: 0.34rem;
+}
+
+[data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"] {
+  margin: 0;
+}
+
+[data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"] > div:first-child {
+  display: none;
+}
+
+[data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"] > div:last-child {
+  width: 100%;
+  border-radius: 14px;
+  padding: 0.56rem 0.72rem;
+  border: 1px solid color-mix(in oklab, var(--pa-border) 76%, transparent);
+  background: color-mix(in oklab, var(--pa-surface) 90%, var(--pa-bg_0));
+  transition: border-color 140ms ease, box-shadow 140ms ease, background 140ms ease;
+}
+
+[data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"] p {
+  color: var(--pa-text);
+  font-weight: 600;
+  margin: 0;
+}
+
+[data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) > div:last-child {
+  border-color: var(--pa-border_strong);
+  background: linear-gradient(
+    135deg,
+    color-mix(in oklab, var(--pa-accent) 34%, transparent),
+    color-mix(in oklab, var(--pa-accent_2) 26%, transparent)
+  );
+  box-shadow: 0 10px 22px color-mix(in oklab, var(--pa-accent) 35%, transparent);
+}
+
+[data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
+  color: var(--pa-text_strong);
+}
+
+[data-testid="stMetric"],
+[data-testid="stMetricValue"],
+[data-testid="stMetricLabel"] {
+  color: var(--pa-text_strong);
+}
+
+[data-testid="metric-container"] {
+  background: var(--pa-surface);
+  border: 1px solid var(--pa-border);
+  border-radius: 16px;
+  box-shadow: 0 10px 24px var(--pa-elev_shadow);
+  padding: 0.86rem 1rem;
+}
+
+.stButton > button,
+[data-testid="stDownloadButton"] > button,
+[data-testid="stFormSubmitButton"] > button {
+  border-radius: 999px;
+  border: 1px solid var(--pa-button_border);
+  background: var(--pa-button_bg);
+  color: var(--pa-button_text);
+  font-weight: 700;
+  box-shadow: 0 8px 18px var(--pa-button_shadow);
+  transition: transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+
+.stButton > button:hover,
+[data-testid="stDownloadButton"] > button:hover,
+[data-testid="stFormSubmitButton"] > button:hover {
+  transform: translateY(-1px);
+  border-color: var(--pa-border_strong);
+  background: var(--pa-button_bg_hover);
+  box-shadow: 0 10px 20px var(--pa-button_shadow);
+}
+
+.stButton > button:disabled,
+[data-testid="stDownloadButton"] > button:disabled,
+[data-testid="stFormSubmitButton"] > button:disabled {
+  opacity: 0.45;
+  box-shadow: none;
+}
+
+[data-testid="stDataFrame"], .stDataFrame {
+  border: 1px solid color-mix(in oklab, var(--pa-border) 90%, transparent);
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--pa-surface) 88%, transparent);
+}
+
+[data-testid="stForm"] {
+  border-radius: 14px;
+  border: 1px solid color-mix(in oklab, var(--pa-border) 80%, transparent);
+  background: color-mix(in oklab, var(--pa-surface) 84%, transparent);
+}
+
+div[data-baseweb="select"] > div,
+div[data-baseweb="input"] > div,
+textarea {
+  background: color-mix(in oklab, var(--pa-surface) 86%, transparent) !important;
+  border: 1px solid color-mix(in oklab, var(--pa-border) 88%, transparent) !important;
+  color: var(--pa-text_strong) !important;
+  border-radius: 12px !important;
+}
+
+div[data-baseweb="select"] input,
+div[data-baseweb="input"] input,
+textarea {
+  color: var(--pa-text_strong) !important;
+}
+
+div[data-baseweb="select"] > div:hover,
+div[data-baseweb="input"] > div:hover,
+textarea:hover {
+  border-color: color-mix(in oklab, var(--pa-accent) 70%, transparent) !important;
+}
+
+div[data-baseweb="select"] > div:focus-within,
+div[data-baseweb="input"] > div:focus-within,
+textarea:focus {
+  border-color: var(--pa-border_strong) !important;
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--pa-accent) 40%, transparent) !important;
+}
+
+[data-testid="stAlert"] {
+  border-radius: 12px;
+  border: 1px solid color-mix(in oklab, var(--pa-border) 92%, transparent);
+  background: color-mix(in oklab, var(--pa-surface) 82%, transparent);
+}
+
+[data-testid="stExpander"] {
+  border: 1px solid color-mix(in oklab, var(--pa-border) 85%, transparent);
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--pa-surface) 72%, transparent);
+}
+
+[data-testid="stFileUploaderDropzone"] {
+  border: 1px dashed color-mix(in oklab, var(--pa-accent) 45%, var(--pa-border)) !important;
+  border-radius: 14px !important;
+  background: color-mix(in oklab, var(--pa-surface) 93%, var(--pa-bg_0)) !important;
+}
+
+[data-testid="stFileUploaderDropzone"] * {
+  color: var(--pa-text_strong) !important;
+}
+
+[data-testid="stFileUploaderDropzone"] button {
+  border-radius: 10px !important;
+  border: 1px solid color-mix(in oklab, var(--pa-border_strong) 58%, transparent) !important;
+  background: color-mix(in oklab, var(--pa-surface) 97%, transparent) !important;
+  color: var(--pa-text_strong) !important;
+}
+
+[data-testid="stProgressBar"] > div > div > div {
+  background: linear-gradient(90deg, var(--pa-accent_2), var(--pa-accent));
+}
+
+[data-baseweb="tab-list"] {
+  gap: 0.4rem;
+}
+
+[data-baseweb="tab"] {
+  color: var(--pa-text_muted) !important;
+  border-bottom: 2px solid transparent !important;
+}
+
+[data-baseweb="tab"][aria-selected="true"] {
+  color: var(--pa-text_strong) !important;
+  border-bottom: 2px solid var(--pa-accent) !important;
+}
+
+button[aria-label^="Help for"] svg {
+  color: color-mix(in oklab, var(--pa-accent_2) 72%, white) !important;
+}
+
+@keyframes pa-fade-up {
+  from {
+    opacity: 0.0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1.0;
+    transform: translateY(0);
+  }
+}
+</style>
+"""
+
+
+def _resolve_theme_key(theme_key: str | None = None) -> str:
+    requested = (theme_key or "").strip().lower()
+    if requested in THEME_PRESETS:
+        st.session_state[UI_THEME_SESSION_KEY] = requested
+        return requested
+
+    current = str(st.session_state.get(UI_THEME_SESSION_KEY, DEFAULT_THEME_PRESET)).strip().lower()
+    if current not in THEME_PRESETS:
+        current = DEFAULT_THEME_PRESET
+    st.session_state[UI_THEME_SESSION_KEY] = current
+    return current
+
+
+def _root_vars(theme_key: str) -> str:
+    preset = THEME_PRESETS[theme_key]
+    return "".join(f"  --pa-{name}: {value};\n" for name, value in preset.items())
+
+
+def render_theme_selector() -> str:
+    options = list(THEME_PRESETS.keys())
+    current = _resolve_theme_key()
+    default_index = options.index(current)
+    selected = st.selectbox(
+        "Color theme",
+        options=options,
+        index=default_index,
+        format_func=lambda key: THEME_LABELS.get(key, key.replace("_", " ").title()),
+        key=UI_THEME_SESSION_KEY,
+        help="Switch between bright, dark, deep dark, and palenight presets.",
+    )
+    return str(selected)
+
+
+def apply_futuristic_theme(theme_key: str | None = None) -> None:
+    resolved = _resolve_theme_key(theme_key)
+    css = THEME_CSS_TEMPLATE.replace("__ROOT_VARS__", _root_vars(resolved))
+    st.markdown(css, unsafe_allow_html=True)
