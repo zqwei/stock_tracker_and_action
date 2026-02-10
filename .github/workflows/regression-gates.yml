@@ -1,0 +1,30 @@
+name: Regression Gates
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - codex/qa/regression-gates
+  workflow_dispatch:
+
+jobs:
+  regression-gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Conda environment
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          activate-environment: portfolio_assistant
+          auto-activate-base: false
+          environment-file: environment.yml
+          channels: conda-forge
+          miniforge-version: latest
+
+      - name: Run regression suite
+        shell: bash -el {0}
+        run: conda run -n portfolio_assistant python -m pytest -q
