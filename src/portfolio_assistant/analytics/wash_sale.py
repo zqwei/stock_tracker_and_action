@@ -11,6 +11,8 @@ from portfolio_assistant.db.models import Account, PnlRealized, TradeNormalized
 
 EPSILON = 1e-12
 IRA_ACCOUNT_TYPES = {"TRAD_IRA", "ROTH_IRA"}
+ADJUSTMENT_TYPE_BASIS_INCREASE = "BASIS_INCREASE"
+ADJUSTMENT_TYPE_PERMANENT_IRA = "PERMANENT_DISALLOWANCE_IRA"
 OPTION_CLOSE_NOTES_RE = re.compile(
     r"^(?P<contract>.+?)\s+(?:LONG|SHORT)\s+CLOSE\s+FROM\s+\d{4}-\d{2}-\d{2}$",
     re.IGNORECASE,
@@ -249,6 +251,8 @@ def estimate_wash_sale_disallowance(
             days_from_sale = (trade.executed_at.date() - sale.close_date).days
             buy_side = _enum_value(trade.side).upper()
             buy_instrument = _enum_value(trade.instrument_type).upper()
+            allocated_disallowed_loss = allocated_qty_equiv * loss_per_share_equiv
+            basis_adjustment_applies = buy_account_type not in IRA_ACCOUNT_TYPES
 
             matches.append(
                 {
@@ -270,6 +274,14 @@ def estimate_wash_sale_disallowance(
                     "cross_account": trade.account_id != sale.account_id,
                     "ira_replacement": buy_account_type in IRA_ACCOUNT_TYPES,
                     "allocated_replacement_quantity_equiv": allocated_qty_equiv,
+                    "allocated_disallowed_loss": allocated_disallowed_loss,
+                    "allocated_disallowed_loss_per_share_equiv": loss_per_share_equiv,
+                    "basis_adjustment_applies": basis_adjustment_applies,
+                    "adjustment_type": (
+                        ADJUSTMENT_TYPE_BASIS_INCREASE
+                        if basis_adjustment_applies
+                        else ADJUSTMENT_TYPE_PERMANENT_IRA
+                    ),
                 }
             )
 
@@ -281,6 +293,42 @@ def estimate_wash_sale_disallowance(
             continue
 
         disallowed_loss = matched_qty_equiv * loss_per_share_equiv
+        adjustment_ledger_entries: list[dict[str, Any]] = []
+        deferred_loss_to_replacement_basis = 0.0
+        permanently_disallowed_loss = 0.0
+        for sequence, match in enumerate(matches, start=1):
+            allocated_disallowed_loss = float(match["allocated_disallowed_loss"])
+            if bool(match["basis_adjustment_applies"]):
+                deferred_loss_to_replacement_basis += allocated_disallowed_loss
+            else:
+                permanently_disallowed_loss += allocated_disallowed_loss
+
+            adjustment_ledger_entries.append(
+                {
+                    "mode": mode,
+                    "sequence": sequence,
+                    "sale_row_id": sale.id,
+                    "sale_account_id": sale.account_id,
+                    "sale_date": sale.close_date.isoformat(),
+                    "symbol": sale_symbol,
+                    "buy_trade_row_id": match["buy_trade_row_id"],
+                    "buy_trade_id": match["buy_trade_id"],
+                    "buy_account_id": match["buy_account_id"],
+                    "buy_account_label": match["buy_account_label"],
+                    "buy_account_type": match["buy_account_type"],
+                    "buy_date": match["buy_date"],
+                    "buy_instrument_type": match["buy_instrument_type"],
+                    "allocated_replacement_quantity_equiv": float(
+                        match["allocated_replacement_quantity_equiv"]
+                    ),
+                    "allocated_disallowed_loss": allocated_disallowed_loss,
+                    "basis_adjustment_applies": bool(match["basis_adjustment_applies"]),
+                    "adjustment_type": match["adjustment_type"],
+                    "cross_account": bool(match["cross_account"]),
+                    "ira_replacement": bool(match["ira_replacement"]),
+                }
+            )
+
         sale_account = accounts.get(sale.account_id)
         sales_out.append(
             {
@@ -304,19 +352,70 @@ def estimate_wash_sale_disallowance(
                 "matched_replacement_quantity_equiv": matched_qty_equiv,
                 "unmatched_replacement_quantity_equiv": remaining_qty_equiv,
                 "disallowed_loss": disallowed_loss,
+                "wash_sale_code": "W",
+                "deferred_loss_to_replacement_basis": deferred_loss_to_replacement_basis,
+                "permanently_disallowed_loss": permanently_disallowed_loss,
                 "has_ira_replacement": any(m["ira_replacement"] for m in matches),
                 "matches": matches,
+                "adjustment_ledger_entries": adjustment_ledger_entries,
             }
         )
 
     adjustments = {row["sale_row_id"]: row["disallowed_loss"] for row in sales_out}
     total_disallowed = float(sum(adjustments.values()))
+    total_deferred = float(
+        sum(float(row["deferred_loss_to_replacement_basis"]) for row in sales_out)
+    )
+    total_permanent = float(sum(float(row["permanently_disallowed_loss"]) for row in sales_out))
+    adjustment_ledger = [
+        entry for sale in sales_out for entry in sale.get("adjustment_ledger_entries", [])
+    ]
+
+    replacement_lot_adjustments: dict[int, dict[str, Any]] = {}
+    for entry in adjustment_ledger:
+        trade_row_id = int(entry["buy_trade_row_id"])
+        bucket = replacement_lot_adjustments.setdefault(
+            trade_row_id,
+            {
+                "buy_trade_row_id": trade_row_id,
+                "buy_trade_id": entry["buy_trade_id"],
+                "buy_account_id": entry["buy_account_id"],
+                "buy_account_label": entry["buy_account_label"],
+                "buy_account_type": entry["buy_account_type"],
+                "buy_date": entry["buy_date"],
+                "symbol": entry["symbol"],
+                "buy_instrument_type": entry["buy_instrument_type"],
+                "allocated_replacement_quantity_equiv": 0.0,
+                "allocated_disallowed_loss": 0.0,
+                "basis_adjustment_applies": bool(entry["basis_adjustment_applies"]),
+                "adjustment_type": entry["adjustment_type"],
+                "source_sale_row_ids": [],
+            },
+        )
+        bucket["allocated_replacement_quantity_equiv"] += float(
+            entry["allocated_replacement_quantity_equiv"]
+        )
+        bucket["allocated_disallowed_loss"] += float(entry["allocated_disallowed_loss"])
+        bucket["source_sale_row_ids"].append(int(entry["sale_row_id"]))
+
+    replacement_lot_adjustments_list = list(replacement_lot_adjustments.values())
+    replacement_lot_adjustments_list.sort(
+        key=lambda row: (
+            str(row["buy_date"]),
+            int(row["buy_trade_row_id"]),
+        )
+    )
+
     return {
         "mode": mode,
         "window_days": window_days,
         "sales": sales_out,
         "sale_adjustments": adjustments,
         "total_disallowed_loss": total_disallowed,
+        "total_deferred_loss_to_replacement_basis": total_deferred,
+        "total_permanently_disallowed_loss": total_permanent,
+        "adjustment_ledger": adjustment_ledger,
+        "replacement_lot_adjustments": replacement_lot_adjustments_list,
     }
 
 
@@ -360,6 +459,9 @@ def detect_wash_sale_risks(
                     "allocated_replacement_quantity_equiv": (
                         match["allocated_replacement_quantity_equiv"]
                     ),
+                    "allocated_disallowed_loss": match["allocated_disallowed_loss"],
+                    "basis_adjustment_applies": match["basis_adjustment_applies"],
+                    "adjustment_type": match["adjustment_type"],
                 }
             )
 
