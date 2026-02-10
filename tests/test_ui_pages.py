@@ -1,0 +1,193 @@
+from __future__ import annotations
+
+from datetime import datetime
+
+import pandas as pd
+
+from portfolio_assistant.analytics.pnl_engine import recompute_pnl
+from portfolio_assistant.analytics.reconciliation import compare_totals, tax_report_totals
+from portfolio_assistant.analytics.tax_year_report import generate_tax_year_report
+from portfolio_assistant.db.models import TradeNormalized
+from portfolio_assistant.ui.streamlit.views.common import dataframe_to_csv_bytes
+from portfolio_assistant.ui.streamlit.views.contributions import (
+    account_contributions_dataframe,
+    external_cash_activity_dataframe,
+    monthly_contributions_dataframe,
+)
+from portfolio_assistant.ui.streamlit.views.holdings import holdings_dataframe
+from portfolio_assistant.ui.streamlit.views.pnl import (
+    realized_detail_dataframe,
+    realized_summary_dataframe,
+)
+from portfolio_assistant.ui.streamlit.views.reconciliation import (
+    checklist_dataframe,
+    comparison_dataframe,
+    diff_table_by_key,
+    normalize_broker_dataframe,
+)
+from portfolio_assistant.ui.streamlit.views.settings import (
+    account_catalog_dataframe,
+    settings_metrics,
+)
+from portfolio_assistant.ui.streamlit.views.tax_year import (
+    tax_year_detail_dataframe,
+    tax_year_summary_dataframe,
+    wash_sale_matches_dataframe,
+)
+
+
+def _add_open_trade(session, account_id: str, symbol: str) -> None:
+    session.add(
+        TradeNormalized(
+            account_id=account_id,
+            broker="B1",
+            executed_at=datetime(2025, 2, 15, 10, 0, 0),
+            instrument_type="STOCK",
+            symbol=symbol,
+            side="BUY",
+            quantity=3,
+            price=120.0,
+            fees=0.0,
+            net_amount=-360.0,
+            multiplier=1,
+            currency="USD",
+        )
+    )
+    session.flush()
+
+
+def test_holdings_dataframe_respects_global_account_scope(
+    db_session,
+    seeded_two_account_activity,
+):
+    taxable_id = seeded_two_account_activity.taxable_id
+    ira_id = seeded_two_account_activity.ira_id
+    _add_open_trade(db_session, taxable_id, "NVDA")
+
+    recompute_pnl(db_session)
+    db_session.commit()
+
+    all_frame = holdings_dataframe(db_session, None)
+    taxable_frame = holdings_dataframe(db_session, taxable_id)
+    ira_frame = holdings_dataframe(db_session, ira_id)
+
+    assert set(all_frame["account_id"]) == {taxable_id, ira_id}
+    assert set(taxable_frame["account_id"]) == {taxable_id}
+    assert set(ira_frame["account_id"]) == {ira_id}
+
+
+def test_pnl_dataframes_split_by_scope(db_session, seeded_two_account_activity):
+    taxable_id = seeded_two_account_activity.taxable_id
+    ira_id = seeded_two_account_activity.ira_id
+
+    recompute_pnl(db_session)
+    db_session.commit()
+
+    all_summary = realized_summary_dataframe(db_session, None)
+    taxable_summary = realized_summary_dataframe(db_session, taxable_id)
+    ira_detail = realized_detail_dataframe(db_session, ira_id)
+
+    assert {"AAPL", "MSFT", "QQQ"}.issubset(set(all_summary["symbol"]))
+    assert set(taxable_summary["symbol"]) == {"AAPL", "MSFT"}
+    assert set(ira_detail["account_id"]) == {ira_id}
+
+
+def test_contributions_page_uses_external_cash_only(db_session, seeded_two_account_activity):
+    taxable_id = seeded_two_account_activity.taxable_id
+    ira_id = seeded_two_account_activity.ira_id
+
+    monthly_all = monthly_contributions_dataframe(db_session, None)
+    activity_all = external_cash_activity_dataframe(db_session, None)
+    account_totals = account_contributions_dataframe(activity_all)
+
+    assert float(monthly_all["net_contribution"].sum()) == 5550.0
+    assert len(activity_all) == 4
+
+    by_account = {
+        row["account_id"]: float(row["net_contribution"])
+        for row in account_totals.to_dict(orient="records")
+    }
+    assert by_account[taxable_id] == 4900.0
+    assert by_account[ira_id] == 650.0
+
+
+def test_tax_year_and_reconciliation_helpers(db_session, seeded_two_account_activity):
+    recompute_pnl(db_session)
+    db_session.commit()
+
+    report = generate_tax_year_report(db_session, tax_year=2025)
+    app_detail = tax_year_detail_dataframe(report)
+    app_summary = tax_year_summary_dataframe(report["summary"])
+    wash_matches = wash_sale_matches_dataframe(report)
+
+    broker_raw = pd.DataFrame(
+        [
+            {
+                "Symbol": "AAPL",
+                "Sale Date": "2025-01-10",
+                "Term": "SHORT",
+                "Proceeds": 900.0,
+                "Cost Basis": 1000.0,
+                "Gain/Loss": -100.0,
+                "Wash": 0.0,
+            },
+            {
+                "Symbol": "MSFT",
+                "Sale Date": "2025-01-12",
+                "Term": "SHORT",
+                "Proceeds": 275.0,
+                "Cost Basis": 250.0,
+                "Gain/Loss": 25.0,
+                "Wash": 0.0,
+            },
+        ]
+    )
+    broker_mapping = {
+        "symbol": "Symbol",
+        "date_sold": "Sale Date",
+        "term": "Term",
+        "proceeds": "Proceeds",
+        "cost_basis": "Cost Basis",
+        "gain_or_loss": "Gain/Loss",
+        "wash_sale_disallowed": "Wash",
+    }
+    broker_detail = normalize_broker_dataframe(broker_raw, broker_mapping)
+    app_totals = tax_report_totals(report["detail_rows"])
+    broker_totals = tax_report_totals(broker_detail.to_dict(orient="records"))
+    comparison = compare_totals(app_totals, broker_totals)
+
+    comparison_frame = comparison_dataframe(comparison)
+    symbol_diff = diff_table_by_key(app_detail, broker_detail, "symbol")
+    checklist = checklist_dataframe(report, comparison, app_detail)
+
+    assert not app_detail.empty
+    assert not app_summary.empty
+    assert not wash_matches.empty
+    assert not comparison_frame.empty
+    assert "AAPL" in set(symbol_diff["symbol"])
+    assert bool(
+        checklist.loc[
+            checklist["check"] == "Cross-account replacements likely",
+            "flagged",
+        ].iloc[0]
+    )
+
+
+def test_settings_helpers_and_csv_bytes(db_session, seeded_two_account_activity):
+    taxable_id = seeded_two_account_activity.taxable_id
+
+    recompute_pnl(db_session)
+    db_session.commit()
+
+    metrics_all = settings_metrics(db_session, None)
+    metrics_taxable = settings_metrics(db_session, taxable_id)
+
+    from portfolio_assistant.assistant.tools_db import list_accounts
+
+    catalog = account_catalog_dataframe(list_accounts(db_session))
+    csv_bytes = dataframe_to_csv_bytes(catalog)
+
+    assert metrics_all["normalized_trades"] > metrics_taxable["normalized_trades"]
+    assert metrics_all["open_positions"] >= metrics_taxable["open_positions"]
+    assert len(catalog) == 2
+    assert csv_bytes.startswith(b"id,broker,account_label,account_type,display")
