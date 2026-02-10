@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from openai import OpenAI
 from sqlalchemy import case, func, select
@@ -19,6 +19,7 @@ from portfolio_assistant.assistant.ask_gpt import (
     extract_response_sources,
     extract_response_text,
 )
+from portfolio_assistant.assistant.rss_ingest import ingest_rss_feeds
 
 
 @dataclass(frozen=True)
@@ -142,6 +143,108 @@ def _top_unrealized_rows(
     ]
 
 
+def _holdings_symbols(session: Session, account_id: str | None) -> list[str]:
+    stmt = select(PositionOpen.symbol).distinct().order_by(PositionOpen.symbol.asc())
+    if account_id:
+        stmt = stmt.where(PositionOpen.account_id == account_id)
+    symbols = []
+    for symbol in session.scalars(stmt).all():
+        token = str(symbol or "").strip().upper()
+        if token:
+            symbols.append(token)
+    return symbols
+
+
+def _holdings_focus_rows(
+    session: Session, account_id: str | None, *, limit: int = 10
+) -> list[dict[str, Any]]:
+    stmt = (
+        select(
+            PositionOpen.symbol,
+            func.sum(PositionOpen.quantity).label("net_quantity"),
+            func.sum(func.coalesce(PositionOpen.market_value, 0.0)).label("market_value"),
+            func.sum(func.coalesce(PositionOpen.unrealized_pnl, 0.0)).label("unrealized_pnl"),
+            func.count().label("position_rows"),
+        )
+        .group_by(PositionOpen.symbol)
+        .order_by(
+            func.abs(func.sum(func.coalesce(PositionOpen.market_value, 0.0))).desc(),
+            PositionOpen.symbol.asc(),
+        )
+        .limit(limit)
+    )
+    if account_id:
+        stmt = stmt.where(PositionOpen.account_id == account_id)
+
+    rows = list(session.execute(stmt).all())
+    payload: list[dict[str, Any]] = []
+    for symbol, net_quantity, market_value, unrealized_pnl, position_rows in rows:
+        ticker = str(symbol or "").strip().upper()
+        if not ticker:
+            continue
+        payload.append(
+            {
+                "symbol": ticker,
+                "net_quantity": float(net_quantity or 0.0),
+                "market_value": float(market_value or 0.0),
+                "unrealized_pnl": float(unrealized_pnl or 0.0),
+                "position_rows": int(position_rows or 0),
+            }
+        )
+    return payload
+
+
+def _holdings_updates_context(
+    *,
+    holdings_symbols: list[str],
+    generated_at: datetime,
+    rss_feed_urls: list[str],
+    rss_lookback_days: int,
+    rss_fetcher: Callable[[str], str] | None,
+) -> dict[str, Any]:
+    configured_feeds = [str(url).strip() for url in rss_feed_urls if str(url).strip()]
+    try:
+        lookback_days = max(int(rss_lookback_days), 0)
+    except (TypeError, ValueError):
+        lookback_days = 10
+    payload: dict[str, Any] = {
+        "source": "rss",
+        "holdings_symbols": holdings_symbols,
+        "configured_feeds": configured_feeds,
+        "lookback_days": lookback_days,
+        "feeds_requested": 0,
+        "feeds_ingested": 0,
+        "duplicate_feeds_skipped": 0,
+        "duplicate_items_skipped": 0,
+        "item_count": 0,
+        "errors": [],
+        "items": [],
+    }
+
+    if not holdings_symbols or not configured_feeds:
+        return payload
+
+    ingest_result = ingest_rss_feeds(
+        feed_urls=configured_feeds,
+        holdings_symbols=holdings_symbols,
+        lookback_days=lookback_days,
+        now=generated_at,
+        fetcher=rss_fetcher,
+    )
+    payload.update(
+        {
+            "feeds_requested": ingest_result.feeds_requested,
+            "feeds_ingested": ingest_result.feeds_ingested,
+            "duplicate_feeds_skipped": ingest_result.duplicate_feeds_skipped,
+            "duplicate_items_skipped": ingest_result.duplicate_items_skipped,
+            "item_count": len(ingest_result.items),
+            "errors": ingest_result.errors,
+            "items": [item.as_dict() for item in ingest_result.items],
+        }
+    )
+    return payload
+
+
 def _default_protective_actions(checks: list[dict[str, Any]]) -> list[str]:
     actions: list[str] = []
     if any(check.get("key") == "wash_sale_replacements" for check in checks):
@@ -178,6 +281,7 @@ def _briefing_instructions() -> str:
         "- No guaranteed outcomes.\n"
         "- No auto-trading instructions.\n"
         "- Do not request or store brokerage credentials.\n"
+        "- Prioritize holdings-aware updates included in the context.\n"
         "Use the provided JSON context and return a short summary plus risk-focused actions."
     )
 
@@ -218,6 +322,9 @@ def generate_daily_briefing(
     account_id: str | None = None,
     include_gpt_summary: bool = False,
     enable_web_context: bool = False,
+    rss_feed_urls: list[str] | None = None,
+    rss_lookback_days: int = 10,
+    rss_fetcher: Callable[[str], str] | None = None,
     output_dir: Path | None = None,
     as_of: datetime | None = None,
     client: OpenAI | None = None,
@@ -229,7 +336,17 @@ def generate_daily_briefing(
         checks = run_deterministic_risk_checks(session, account_id=account_id)
         top_realized = _top_realized_rows(session, account_id=account_id)
         top_unrealized = _top_unrealized_rows(session, account_id=account_id)
+        holdings_symbols = _holdings_symbols(session, account_id=account_id)
+        holdings_focus = _holdings_focus_rows(session, account_id=account_id)
 
+    feed_urls = list(rss_feed_urls or [])
+    holdings_updates = _holdings_updates_context(
+        holdings_symbols=holdings_symbols,
+        generated_at=generated_at,
+        rss_feed_urls=feed_urls,
+        rss_lookback_days=rss_lookback_days,
+        rss_fetcher=rss_fetcher,
+    )
     protective_actions = _default_protective_actions(checks)
     payload: dict[str, Any] = {
         "generated_at": generated_at.isoformat(),
@@ -241,6 +358,11 @@ def generate_daily_briefing(
         },
         "snapshot": snapshot,
         "risk_checks": checks,
+        "holdings_context": {
+            "symbols": holdings_symbols,
+            "focus": holdings_focus,
+        },
+        "holdings_updates": holdings_updates,
         "top_realized": top_realized,
         "top_unrealized": top_unrealized,
         "protective_actions": protective_actions,
