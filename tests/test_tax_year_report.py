@@ -182,6 +182,7 @@ def test_tax_year_report_includes_broker_vs_irs_wash_sale_differences_and_math_c
             rel_tol=0.0,
             abs_tol=1e-9,
         )
+        assert summary["year_end_open_lot_count"] == 0
         assert bool(summary["math_check_raw"])
         assert bool(summary["math_check_adjusted"])
 
@@ -210,6 +211,18 @@ def test_tax_year_report_includes_broker_vs_irs_wash_sale_differences_and_math_c
             rel_tol=0.0,
             abs_tol=1e-9,
         )
+
+        mode_diffs = report["broker_vs_irs_reconciliation"]["mode_diffs"]
+        assert isclose(
+            float(mode_diffs["totals"]["gain_or_loss_delta"]),
+            70.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+        checklist = report["broker_vs_irs_reconciliation"]["checklist"]
+        by_key = {row["key"]: row for row in checklist}
+        assert by_key["cross_account_replacements_likely"]["flag"]
+        assert not by_key["options_replacements_likely"]["flag"]
 
 
 def test_tax_year_report_applies_january_replacements_to_december_loss_sales():
@@ -293,6 +306,104 @@ def test_tax_year_report_applies_january_replacements_to_december_loss_sales():
             abs_tol=1e-9,
         )
         assert isclose(float(summary["total_gain_or_loss"]), 0.0, rel_tol=0.0, abs_tol=1e-9)
+        assert report["year_end_lot_snapshot"] == []
+
+
+def test_tax_year_report_year_end_lot_snapshot_includes_wash_adjusted_basis():
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        taxable = Account(broker="B1", account_label="Taxable", account_type="TAXABLE")
+        session.add(taxable)
+        session.flush()
+
+        session.add_all(
+            [
+                TradeNormalized(
+                    account_id=taxable.id,
+                    broker="B1",
+                    executed_at=datetime(2024, 11, 15, 10, 0, 0),
+                    instrument_type="STOCK",
+                    symbol="AAPL",
+                    side="BUY",
+                    quantity=10,
+                    price=100.0,
+                    fees=0.0,
+                    net_amount=-1000.0,
+                    multiplier=1,
+                    currency="USD",
+                ),
+                TradeNormalized(
+                    account_id=taxable.id,
+                    broker="B1",
+                    executed_at=datetime(2025, 1, 10, 10, 0, 0),
+                    instrument_type="STOCK",
+                    symbol="AAPL",
+                    side="SELL",
+                    quantity=10,
+                    price=90.0,
+                    fees=0.0,
+                    net_amount=900.0,
+                    multiplier=1,
+                    currency="USD",
+                ),
+                TradeNormalized(
+                    account_id=taxable.id,
+                    broker="B1",
+                    executed_at=datetime(2025, 1, 20, 10, 0, 0),
+                    instrument_type="STOCK",
+                    symbol="AAPL",
+                    side="BUY",
+                    quantity=4,
+                    price=92.0,
+                    fees=0.0,
+                    net_amount=-368.0,
+                    multiplier=1,
+                    currency="USD",
+                ),
+            ]
+        )
+        session.flush()
+
+        recompute_pnl(session)
+        session.commit()
+
+        report = generate_tax_year_report(session, tax_year=2025, account_id=taxable.id)
+        assert report["summary"]["rows"] == 1
+
+        row = report["detail_rows"][0]
+        assert isclose(
+            float(row["wash_sale_disallowed"]),
+            40.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+
+        snapshot = report["year_end_lot_snapshot"]
+        assert len(snapshot) == 1
+        lot = snapshot[0]
+        assert lot["symbol"] == "AAPL"
+        assert lot["position_side"] == "LONG"
+        assert isclose(float(lot["quantity"]), 4.0, rel_tol=0.0, abs_tol=1e-9)
+        assert isclose(float(lot["raw_cost_basis"]), 368.0, rel_tol=0.0, abs_tol=1e-9)
+        assert isclose(
+            float(lot["wash_sale_basis_adjustment"]),
+            40.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+        assert isclose(float(lot["adjusted_cost_basis"]), 408.0, rel_tol=0.0, abs_tol=1e-9)
+
+        summary = report["summary"]
+        assert summary["year_end_open_lot_count"] == 1
+        assert isclose(float(summary["year_end_raw_basis_total"]), 368.0, rel_tol=0.0, abs_tol=1e-9)
+        assert isclose(
+            float(summary["year_end_wash_basis_adjustment_total"]),
+            40.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
 
 
 def test_tax_report_totals_handles_zero_raw_gain_and_basis_fallback():

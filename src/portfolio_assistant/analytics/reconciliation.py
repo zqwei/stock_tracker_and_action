@@ -1,13 +1,26 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import date
-from typing import Any
+from datetime import date, datetime
+from typing import Any, Callable
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from portfolio_assistant.db.models import CashActivity, PnlRealized
+
+EPSILON = 1e-9
+CORPORATE_ACTION_KEYWORDS = (
+    "SPLIT",
+    "REVERSE SPLIT",
+    "MERGER",
+    "SPIN",
+    "SPINOFF",
+    "REORG",
+    "REORGANIZATION",
+    "CUSIP",
+    "SYMBOL CHANGE",
+)
 
 
 def _as_float(value: Any, default: float = 0.0) -> float:
@@ -25,6 +38,104 @@ def _as_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _normalize_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _normalize_symbol(value: Any) -> str:
+    return _normalize_text(value).upper()
+
+
+def _normalize_term(value: Any) -> str:
+    term = _normalize_text(value).upper()
+    if term in {"SHORT", "ST"}:
+        return "SHORT"
+    if term in {"LONG", "LT"}:
+        return "LONG"
+    if not term:
+        return "UNKNOWN"
+    return term
+
+
+def _coerce_iso_date_text(value: Any) -> str:
+    text = _normalize_text(value)
+    if not text:
+        return ""
+
+    if len(text) >= 10:
+        candidate = text[:10]
+        try:
+            datetime.strptime(candidate, "%Y-%m-%d")
+            return candidate
+        except ValueError:
+            pass
+
+    for fmt in ("%m/%d/%Y", "%m/%d/%y", "%Y/%m/%d"):
+        try:
+            parsed = datetime.strptime(text, fmt)
+            return parsed.date().isoformat()
+        except ValueError:
+            continue
+
+    try:
+        parsed = datetime.fromisoformat(text)
+        return parsed.date().isoformat()
+    except ValueError:
+        return text
+
+
+def _row_date_key(row: dict[str, Any]) -> str:
+    return _coerce_iso_date_text(
+        row.get("date_sold")
+        or row.get("sale_date")
+        or row.get("close_date")
+        or row.get("date")
+    )
+
+
+def _row_symbol_key(row: dict[str, Any]) -> str:
+    return _normalize_symbol(row.get("symbol") or row.get("description"))
+
+
+def _row_cost_basis(row: dict[str, Any]) -> float:
+    value = row.get("cost_basis")
+    if value is None:
+        value = row.get("basis")
+    return _as_float(value, 0.0)
+
+
+def _row_wash_broker(row: dict[str, Any]) -> float:
+    wash = _as_float(row.get("wash_sale_disallowed"), 0.0)
+    return _as_float(row.get("wash_sale_disallowed_broker"), wash)
+
+
+def _row_wash_irs(row: dict[str, Any]) -> float:
+    wash = _as_float(row.get("wash_sale_disallowed"), 0.0)
+    return _as_float(row.get("wash_sale_disallowed_irs"), wash)
+
+
+def _row_gain_raw(row: dict[str, Any]) -> float:
+    gain_or_loss = _as_float(row.get("gain_or_loss"), 0.0)
+    raw = row.get("raw_gain_or_loss")
+    if raw is None:
+        return gain_or_loss
+    return _as_float(raw, gain_or_loss)
+
+
+def _row_gain_broker(row: dict[str, Any]) -> float:
+    value = row.get("gain_or_loss_broker")
+    if value is not None:
+        return _as_float(value, 0.0)
+    return _row_gain_raw(row) + _row_wash_broker(row)
+
+
+def _row_gain_irs(row: dict[str, Any]) -> float:
+    value = row.get("gain_or_loss_irs")
+    if value is not None:
+        return _as_float(value, 0.0)
+    return _row_gain_raw(row) + _row_wash_irs(row)
 
 
 def net_contributions(session: Session, account_id: str | None = None) -> float:
@@ -107,29 +218,13 @@ def tax_report_totals(detail_rows: list[dict[str, Any]]) -> dict[str, float]:
 
     for row in detail_rows:
         proceeds = _as_float(row.get("proceeds"), 0.0)
-
-        cost_basis_value = row.get("cost_basis")
-        if cost_basis_value is None:
-            cost_basis_value = row.get("basis")
-        cost_basis = _as_float(cost_basis_value, 0.0)
-
+        cost_basis = _row_cost_basis(row)
         gain_or_loss = _as_float(row.get("gain_or_loss"), 0.0)
-
-        raw_gain_or_loss_value = row.get("raw_gain_or_loss")
-        if raw_gain_or_loss_value is None:
-            raw_gain_or_loss_value = gain_or_loss
-        raw_gain_or_loss = _as_float(raw_gain_or_loss_value, gain_or_loss)
-
+        raw_gain_or_loss = _row_gain_raw(row)
         wash_disallowed = _as_float(row.get("wash_sale_disallowed"), 0.0)
-        wash_disallowed_broker = _as_float(
-            row.get("wash_sale_disallowed_broker"),
-            wash_disallowed,
-        )
-        wash_disallowed_irs = _as_float(
-            row.get("wash_sale_disallowed_irs"),
-            wash_disallowed,
-        )
-        term = str(row.get("term", "UNKNOWN") or "UNKNOWN").upper()
+        wash_disallowed_broker = _row_wash_broker(row)
+        wash_disallowed_irs = _row_wash_irs(row)
+        term = _normalize_term(row.get("term"))
 
         totals["total_proceeds"] += proceeds
         totals["total_cost_basis"] += cost_basis
@@ -234,3 +329,417 @@ def compare_totals(
             "delta": app_value - broker_value,
         }
     return comparison
+
+
+def _aggregate_rows(
+    rows: list[dict[str, Any]], key_fn: Callable[[dict[str, Any]], str]
+) -> dict[str, dict[str, float]]:
+    buckets: dict[str, dict[str, float]] = defaultdict(
+        lambda: {
+            "proceeds": 0.0,
+            "cost_basis": 0.0,
+            "gain_or_loss": 0.0,
+            "wash_sale_disallowed": 0.0,
+            "count": 0.0,
+        }
+    )
+    for row in rows:
+        key = key_fn(row)
+        bucket = buckets[key]
+        bucket["proceeds"] += _as_float(row.get("proceeds"), 0.0)
+        bucket["cost_basis"] += _row_cost_basis(row)
+        bucket["gain_or_loss"] += _as_float(row.get("gain_or_loss"), 0.0)
+        bucket["wash_sale_disallowed"] += _as_float(row.get("wash_sale_disallowed"), 0.0)
+        bucket["count"] += 1.0
+    return buckets
+
+
+def _diff_from_aggregates(
+    app_agg: dict[str, dict[str, float]],
+    broker_agg: dict[str, dict[str, float]],
+    key_name: str,
+) -> list[dict[str, float | str]]:
+    rows: list[dict[str, float | str]] = []
+    keys = sorted(set(app_agg) | set(broker_agg))
+    for key in keys:
+        app_bucket = app_agg.get(key) or {}
+        broker_bucket = broker_agg.get(key) or {}
+        app_proceeds = _as_float(app_bucket.get("proceeds"), 0.0)
+        broker_proceeds = _as_float(broker_bucket.get("proceeds"), 0.0)
+        app_basis = _as_float(app_bucket.get("cost_basis"), 0.0)
+        broker_basis = _as_float(broker_bucket.get("cost_basis"), 0.0)
+        app_gain = _as_float(app_bucket.get("gain_or_loss"), 0.0)
+        broker_gain = _as_float(broker_bucket.get("gain_or_loss"), 0.0)
+        app_wash = _as_float(app_bucket.get("wash_sale_disallowed"), 0.0)
+        broker_wash = _as_float(broker_bucket.get("wash_sale_disallowed"), 0.0)
+
+        rows.append(
+            {
+                key_name: key,
+                "app_proceeds": app_proceeds,
+                "broker_proceeds": broker_proceeds,
+                "delta_proceeds": app_proceeds - broker_proceeds,
+                "app_cost_basis": app_basis,
+                "broker_cost_basis": broker_basis,
+                "delta_cost_basis": app_basis - broker_basis,
+                "app_gain_or_loss": app_gain,
+                "broker_gain_or_loss": broker_gain,
+                "delta_gain_or_loss": app_gain - broker_gain,
+                "app_wash_sale_disallowed": app_wash,
+                "broker_wash_sale_disallowed": broker_wash,
+                "delta_wash_sale_disallowed": app_wash - broker_wash,
+                "app_count": _as_float(app_bucket.get("count"), 0.0),
+                "broker_count": _as_float(broker_bucket.get("count"), 0.0),
+            }
+        )
+    return rows
+
+
+def build_app_vs_broker_diff_tables(
+    app_detail_rows: list[dict[str, Any]],
+    broker_detail_rows: list[dict[str, Any]],
+) -> dict[str, list[dict[str, float | str]]]:
+    app_by_symbol = _aggregate_rows(app_detail_rows, _row_symbol_key)
+    broker_by_symbol = _aggregate_rows(broker_detail_rows, _row_symbol_key)
+    by_symbol = _diff_from_aggregates(app_by_symbol, broker_by_symbol, "symbol")
+
+    app_by_sale_date = _aggregate_rows(app_detail_rows, _row_date_key)
+    broker_by_sale_date = _aggregate_rows(broker_detail_rows, _row_date_key)
+    by_sale_date = _diff_from_aggregates(app_by_sale_date, broker_by_sale_date, "sale_date")
+
+    app_by_term = _aggregate_rows(app_detail_rows, lambda row: _normalize_term(row.get("term")))
+    broker_by_term = _aggregate_rows(
+        broker_detail_rows, lambda row: _normalize_term(row.get("term"))
+    )
+    by_term = _diff_from_aggregates(app_by_term, broker_by_term, "term")
+
+    return {
+        "by_symbol": by_symbol,
+        "by_sale_date": by_sale_date,
+        "by_term": by_term,
+    }
+
+
+def broker_vs_irs_diffs(detail_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    by_trade: list[dict[str, Any]] = []
+    by_symbol: dict[str, dict[str, float]] = defaultdict(
+        lambda: {
+            "broker_gain_or_loss": 0.0,
+            "irs_gain_or_loss": 0.0,
+            "gain_or_loss_delta": 0.0,
+            "broker_wash_sale_disallowed": 0.0,
+            "irs_wash_sale_disallowed": 0.0,
+            "wash_sale_disallowed_delta": 0.0,
+            "count": 0.0,
+        }
+    )
+    by_sale_date: dict[str, dict[str, float]] = defaultdict(
+        lambda: {
+            "broker_gain_or_loss": 0.0,
+            "irs_gain_or_loss": 0.0,
+            "gain_or_loss_delta": 0.0,
+            "broker_wash_sale_disallowed": 0.0,
+            "irs_wash_sale_disallowed": 0.0,
+            "wash_sale_disallowed_delta": 0.0,
+            "count": 0.0,
+        }
+    )
+    by_term: dict[str, dict[str, float]] = defaultdict(
+        lambda: {
+            "broker_gain_or_loss": 0.0,
+            "irs_gain_or_loss": 0.0,
+            "gain_or_loss_delta": 0.0,
+            "broker_wash_sale_disallowed": 0.0,
+            "irs_wash_sale_disallowed": 0.0,
+            "wash_sale_disallowed_delta": 0.0,
+            "count": 0.0,
+        }
+    )
+
+    for row in detail_rows:
+        symbol = _row_symbol_key(row)
+        sale_date = _row_date_key(row)
+        term = _normalize_term(row.get("term"))
+
+        broker_gain = _row_gain_broker(row)
+        irs_gain = _row_gain_irs(row)
+        gain_delta = irs_gain - broker_gain
+        broker_wash = _row_wash_broker(row)
+        irs_wash = _row_wash_irs(row)
+        wash_delta = irs_wash - broker_wash
+
+        by_trade.append(
+            {
+                "sale_row_id": int(_as_float(row.get("sale_row_id"), 0.0)),
+                "symbol": symbol,
+                "sale_date": sale_date,
+                "term": term,
+                "raw_gain_or_loss": _row_gain_raw(row),
+                "broker_gain_or_loss": broker_gain,
+                "irs_gain_or_loss": irs_gain,
+                "gain_or_loss_delta": gain_delta,
+                "broker_wash_sale_disallowed": broker_wash,
+                "irs_wash_sale_disallowed": irs_wash,
+                "wash_sale_disallowed_delta": wash_delta,
+            }
+        )
+
+        for bucket in (by_symbol[symbol], by_sale_date[sale_date], by_term[term]):
+            bucket["broker_gain_or_loss"] += broker_gain
+            bucket["irs_gain_or_loss"] += irs_gain
+            bucket["gain_or_loss_delta"] += gain_delta
+            bucket["broker_wash_sale_disallowed"] += broker_wash
+            bucket["irs_wash_sale_disallowed"] += irs_wash
+            bucket["wash_sale_disallowed_delta"] += wash_delta
+            bucket["count"] += 1.0
+
+    by_trade.sort(key=lambda row: (str(row["sale_date"]), str(row["symbol"]), int(row["sale_row_id"])))
+
+    def _flatten(
+        label: str, buckets: dict[str, dict[str, float]]
+    ) -> list[dict[str, float | str]]:
+        rows: list[dict[str, float | str]] = []
+        for key in sorted(buckets):
+            bucket = buckets[key]
+            rows.append(
+                {
+                    label: key,
+                    "broker_gain_or_loss": float(bucket["broker_gain_or_loss"]),
+                    "irs_gain_or_loss": float(bucket["irs_gain_or_loss"]),
+                    "gain_or_loss_delta": float(bucket["gain_or_loss_delta"]),
+                    "broker_wash_sale_disallowed": float(
+                        bucket["broker_wash_sale_disallowed"]
+                    ),
+                    "irs_wash_sale_disallowed": float(bucket["irs_wash_sale_disallowed"]),
+                    "wash_sale_disallowed_delta": float(bucket["wash_sale_disallowed_delta"]),
+                    "count": int(bucket["count"]),
+                }
+            )
+        return rows
+
+    totals = {
+        "broker_gain_or_loss": float(sum(row["broker_gain_or_loss"] for row in by_trade)),
+        "irs_gain_or_loss": float(sum(row["irs_gain_or_loss"] for row in by_trade)),
+        "gain_or_loss_delta": float(sum(row["gain_or_loss_delta"] for row in by_trade)),
+        "broker_wash_sale_disallowed": float(
+            sum(row["broker_wash_sale_disallowed"] for row in by_trade)
+        ),
+        "irs_wash_sale_disallowed": float(sum(row["irs_wash_sale_disallowed"] for row in by_trade)),
+        "wash_sale_disallowed_delta": float(
+            sum(row["wash_sale_disallowed_delta"] for row in by_trade)
+        ),
+        "rows": len(by_trade),
+    }
+    return {
+        "by_trade": by_trade,
+        "by_symbol": _flatten("symbol", by_symbol),
+        "by_sale_date": _flatten("sale_date", by_sale_date),
+        "by_term": _flatten("term", by_term),
+        "totals": totals,
+    }
+
+
+def build_broker_vs_irs_diffs(detail_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return broker_vs_irs_diffs(detail_rows)
+
+
+def _collect_irs_matches(wash_sale_summary: dict[str, Any] | None) -> list[dict[str, Any]]:
+    irs_sales = ((wash_sale_summary or {}).get("irs") or {}).get("sales") or []
+    matches: list[dict[str, Any]] = []
+    for sale in irs_sales:
+        sale_date = _coerce_iso_date_text(sale.get("sale_date"))
+        for match in sale.get("matches") or []:
+            matches.append(
+                {
+                    "sale_row_id": int(_as_float(sale.get("sale_row_id"), 0.0)),
+                    "symbol": _normalize_symbol(sale.get("symbol")),
+                    "sale_date": sale_date,
+                    "buy_date": _coerce_iso_date_text(match.get("buy_date")),
+                    "days_from_sale": int(_as_float(match.get("days_from_sale"), 0.0)),
+                    "cross_account": bool(match.get("cross_account")),
+                    "ira_replacement": bool(match.get("ira_replacement")),
+                    "buy_instrument_type": _normalize_text(
+                        match.get("buy_instrument_type")
+                    ).upper(),
+                }
+            )
+    return matches
+
+
+def _build_checklist_rows(
+    *,
+    tax_year: int | None,
+    mode_diffs: dict[str, Any],
+    wash_sale_summary: dict[str, Any] | None,
+    detail_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    irs_matches = _collect_irs_matches(wash_sale_summary)
+
+    missing_boundary_evidence = []
+    if tax_year is not None:
+        for match in irs_matches:
+            sale_date_text = _normalize_text(match.get("sale_date"))
+            buy_date_text = _normalize_text(match.get("buy_date"))
+            try:
+                sale_date = datetime.strptime(sale_date_text, "%Y-%m-%d").date()
+                buy_date = datetime.strptime(buy_date_text, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+
+            if sale_date.year != tax_year:
+                continue
+            if buy_date.year != sale_date.year:
+                missing_boundary_evidence.append(
+                    {
+                        "sale_row_id": match["sale_row_id"],
+                        "symbol": match["symbol"],
+                        "sale_date": sale_date.isoformat(),
+                        "buy_date": buy_date.isoformat(),
+                    }
+                )
+
+    cross_account_evidence = [
+        {
+            "sale_row_id": row["sale_row_id"],
+            "symbol": row["symbol"],
+            "sale_date": row["sale_date"],
+            "buy_date": row["buy_date"],
+        }
+        for row in irs_matches
+        if bool(row.get("cross_account"))
+    ]
+    options_evidence = [
+        {
+            "sale_row_id": row["sale_row_id"],
+            "symbol": row["symbol"],
+            "sale_date": row["sale_date"],
+            "buy_date": row["buy_date"],
+            "buy_instrument_type": row["buy_instrument_type"],
+        }
+        for row in irs_matches
+        if row.get("buy_instrument_type") == "OPTION"
+    ]
+
+    trade_diffs = mode_diffs.get("by_trade") or []
+    lot_mismatch_evidence = [
+        {
+            "sale_row_id": row["sale_row_id"],
+            "symbol": row["symbol"],
+            "sale_date": row["sale_date"],
+            "gain_or_loss_delta": row["gain_or_loss_delta"],
+            "wash_sale_disallowed_delta": row["wash_sale_disallowed_delta"],
+        }
+        for row in trade_diffs
+        if abs(_as_float(row.get("gain_or_loss_delta"), 0.0)) > EPSILON
+        and abs(_as_float(row.get("wash_sale_disallowed_delta"), 0.0)) <= EPSILON
+    ]
+
+    corporate_action_evidence = []
+    for row in detail_rows:
+        description = _normalize_text(row.get("description") or row.get("symbol"))
+        upper = description.upper()
+        if any(keyword in upper for keyword in CORPORATE_ACTION_KEYWORDS):
+            corporate_action_evidence.append(
+                {
+                    "sale_row_id": int(_as_float(row.get("sale_row_id"), 0.0)),
+                    "description": description,
+                }
+            )
+
+    checklist = [
+        {
+            "key": "missing_boundary_data",
+            "title": "Missing boundary data?",
+            "flag": bool(missing_boundary_evidence),
+            "status": "YES" if missing_boundary_evidence else "NO",
+            "reason": (
+                "Cross-year replacement links indicate Dec/Jan boundary sensitivity."
+                if missing_boundary_evidence
+                else "No cross-year replacement links detected in IRS wash matches."
+            ),
+            "evidence": missing_boundary_evidence,
+        },
+        {
+            "key": "cross_account_replacements_likely",
+            "title": "Cross-account replacements likely?",
+            "flag": bool(cross_account_evidence),
+            "status": "YES" if cross_account_evidence else "NO",
+            "reason": (
+                "IRS wash matches include replacement buys in different accounts."
+                if cross_account_evidence
+                else "No cross-account replacement matches detected."
+            ),
+            "evidence": cross_account_evidence,
+        },
+        {
+            "key": "options_replacements_likely",
+            "title": "Options replacements likely?",
+            "flag": bool(options_evidence),
+            "status": "YES" if options_evidence else "NO",
+            "reason": (
+                "IRS wash matches include option acquisitions as replacements."
+                if options_evidence
+                else "No option replacement matches detected."
+            ),
+            "evidence": options_evidence,
+        },
+        {
+            "key": "lot_method_mismatch",
+            "title": "Lot method mismatch?",
+            "flag": bool(lot_mismatch_evidence),
+            "status": "YES" if lot_mismatch_evidence else "NO",
+            "reason": (
+                "Per-trade gain deltas exist without wash deltas."
+                if lot_mismatch_evidence
+                else "All mode differences are explained by wash-sale adjustments."
+            ),
+            "evidence": lot_mismatch_evidence,
+        },
+        {
+            "key": "corporate_actions_present",
+            "title": "Corporate actions present?",
+            "flag": bool(corporate_action_evidence),
+            "status": "YES" if corporate_action_evidence else "NO",
+            "reason": (
+                "Corporate-action keywords detected in trade descriptions."
+                if corporate_action_evidence
+                else "No corporate-action keywords detected in disposition descriptions."
+            ),
+            "evidence": corporate_action_evidence,
+        },
+    ]
+    return checklist
+
+
+def build_reconciliation_checklist(
+    report: dict[str, Any],
+    mode_diffs: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    summary = report.get("summary") or {}
+    tax_year = int(_as_float(summary.get("tax_year"), 0.0)) if summary.get("tax_year") else None
+    detail_rows = report.get("detail_rows") or []
+    if mode_diffs is None:
+        mode_diffs = broker_vs_irs_diffs(detail_rows)
+    wash_sale_summary = report.get("wash_sale_summary") or {}
+    return _build_checklist_rows(
+        tax_year=tax_year,
+        mode_diffs=mode_diffs,
+        wash_sale_summary=wash_sale_summary,
+        detail_rows=detail_rows,
+    )
+
+
+def broker_vs_irs_checklist(
+    report: dict[str, Any], mode_diffs: dict[str, Any] | None = None
+) -> list[dict[str, Any]]:
+    return build_reconciliation_checklist(report, mode_diffs=mode_diffs)
+
+
+def build_broker_vs_irs_reconciliation(report: dict[str, Any]) -> dict[str, Any]:
+    detail_rows = report.get("detail_rows") or []
+    mode_diffs = broker_vs_irs_diffs(detail_rows)
+    checklist = build_reconciliation_checklist(report, mode_diffs=mode_diffs)
+    return {
+        "mode_diffs": mode_diffs,
+        "checklist": checklist,
+    }

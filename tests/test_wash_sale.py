@@ -428,3 +428,115 @@ def test_wash_sale_broker_mode_excludes_option_replacements_for_stock_losses():
         risks = detect_wash_sale_risks(session)
         assert len(risks) == 1
         assert risks[0]["buy_instrument_type"] == "OPTION"
+
+
+def test_wash_sale_returns_lot_level_adjustment_ledger_and_ira_classification():
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        taxable_1 = Account(broker="B1", account_label="Taxable 1", account_type="TAXABLE")
+        taxable_2 = Account(broker="B1", account_label="Taxable 2", account_type="TAXABLE")
+        roth = Account(broker="B1", account_label="Roth", account_type="ROTH_IRA")
+        session.add_all([taxable_1, taxable_2, roth])
+        session.flush()
+
+        session.add_all(
+            [
+                TradeNormalized(
+                    account_id=taxable_1.id,
+                    broker="B1",
+                    executed_at=datetime(2024, 11, 15, 10, 0, 0),
+                    instrument_type="STOCK",
+                    symbol="AAPL",
+                    side="BUY",
+                    quantity=10,
+                    price=100.0,
+                    fees=0.0,
+                    net_amount=-1000.0,
+                    multiplier=1,
+                    currency="USD",
+                ),
+                TradeNormalized(
+                    account_id=taxable_1.id,
+                    broker="B1",
+                    executed_at=datetime(2025, 1, 10, 10, 0, 0),
+                    instrument_type="STOCK",
+                    symbol="AAPL",
+                    side="SELL",
+                    quantity=10,
+                    price=90.0,
+                    fees=0.0,
+                    net_amount=900.0,
+                    multiplier=1,
+                    currency="USD",
+                ),
+                TradeNormalized(
+                    account_id=taxable_2.id,
+                    broker="B1",
+                    executed_at=datetime(2025, 1, 20, 10, 0, 0),
+                    instrument_type="STOCK",
+                    symbol="AAPL",
+                    side="BUY",
+                    quantity=4,
+                    price=92.0,
+                    fees=0.0,
+                    net_amount=-368.0,
+                    multiplier=1,
+                    currency="USD",
+                ),
+                TradeNormalized(
+                    account_id=roth.id,
+                    broker="B1",
+                    executed_at=datetime(2025, 1, 22, 10, 0, 0),
+                    instrument_type="STOCK",
+                    symbol="AAPL",
+                    side="BUY",
+                    quantity=3,
+                    price=93.0,
+                    fees=0.0,
+                    net_amount=-279.0,
+                    multiplier=1,
+                    currency="USD",
+                ),
+            ]
+        )
+        session.flush()
+
+        recompute_pnl(session)
+        session.commit()
+
+        analysis = estimate_wash_sale_disallowance(session, mode="irs")
+        assert isclose(float(analysis["total_disallowed_loss"]), 70.0, rel_tol=0.0, abs_tol=1e-9)
+        assert isclose(
+            float(analysis["total_deferred_loss_to_replacement_basis"]),
+            40.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+        assert isclose(
+            float(analysis["total_permanently_disallowed_loss"]),
+            30.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+
+        ledger = analysis["adjustment_ledger"]
+        assert len(ledger) == 2
+        assert any(
+            row["adjustment_type"] == "BASIS_INCREASE"
+            and isclose(
+                float(row["allocated_disallowed_loss"]), 40.0, rel_tol=0.0, abs_tol=1e-9
+            )
+            for row in ledger
+        )
+        assert any(
+            row["adjustment_type"] == "PERMANENT_DISALLOWANCE_IRA"
+            and isclose(
+                float(row["allocated_disallowed_loss"]), 30.0, rel_tol=0.0, abs_tol=1e-9
+            )
+            for row in ledger
+        )
+
+        replacement_rows = analysis["replacement_lot_adjustments"]
+        assert len(replacement_rows) == 2
