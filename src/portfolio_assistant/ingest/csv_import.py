@@ -143,7 +143,16 @@ def normalize_trade_records(
         option_symbol_candidate = option_symbol_raw or symbol_value
         parsed_option = parse_option_symbol(option_symbol_candidate)
         instrument_value = row_data.get("instrument_type")
-        if not str(instrument_value or "").strip() and default_instrument:
+        instrument_text = str(instrument_value or "").strip().upper()
+        explicit_instrument_tokens = {"STOCK", "EQUITY", "OPTION", "OPT", "OPTIONS"}
+        if (
+            default_instrument
+            and (
+                not instrument_text
+                or instrument_text in {"N/A", "NA", "--", "UNKNOWN"}
+                or instrument_text not in explicit_instrument_tokens
+            )
+        ):
             instrument_value = default_instrument
         instrument_type = normalize_instrument_type(
             instrument_value,
