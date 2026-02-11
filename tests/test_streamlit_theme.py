@@ -42,4 +42,6 @@ def test_apply_futuristic_theme_deep_dark_excludes_bright_only_rules(monkeypatch
 
     assert captured["unsafe"] is True
     assert "--pa-bg_0: #000000;" in css
+    assert "--pa-button_bg: #15181c;" in css
+    assert "--pa-button_border: #3a424d;" in css
     assert "[data-testid=\"stAlertContainer\"]:has([data-testid=\"stAlertContentWarning\"])" not in css
