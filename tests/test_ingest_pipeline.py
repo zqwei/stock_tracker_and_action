@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 import pytest
@@ -28,6 +28,65 @@ def _setup_account(session: Session) -> Account:
     session.add(account)
     session.flush()
     return account
+
+
+def _trade_import_rows(account_id: str, start: int, count: int) -> tuple[list[dict], list[dict]]:
+    raw_rows: list[dict] = []
+    normalized_rows: list[dict] = []
+    for idx in range(start, start + count):
+        executed_at = datetime(2025, 1, 1, 9, 30, 0) + timedelta(minutes=idx)
+        raw_rows.append(
+            {
+                "Date": executed_at.isoformat(),
+                "Type": "STOCK",
+                "Side": "BUY",
+                "Qty": "1",
+                "Price": "10",
+                "Symbol": "AAPL",
+            }
+        )
+        normalized_rows.append(
+            {
+                "account_id": account_id,
+                "broker": "B1",
+                "trade_id": f"T-{idx}",
+                "executed_at": executed_at,
+                "instrument_type": "STOCK",
+                "symbol": "AAPL",
+                "side": "BUY",
+                "option_symbol_raw": None,
+                "underlying": None,
+                "expiration": None,
+                "strike": None,
+                "call_put": None,
+                "multiplier": 1,
+                "quantity": 1.0,
+                "price": 10.0,
+                "fees": 0.0,
+                "net_amount": -10.0,
+                "currency": "USD",
+            }
+        )
+    return raw_rows, normalized_rows
+
+
+def _cash_rows(account_id: str, start: int, count: int) -> list[dict]:
+    rows: list[dict] = []
+    for idx in range(start, start + count):
+        posted_at = datetime(2025, 1, 5, 12, 0, 0) + timedelta(minutes=idx)
+        rows.append(
+            {
+                "account_id": account_id,
+                "broker": "B1",
+                "posted_at": posted_at,
+                "activity_type": "DEPOSIT",
+                "amount": 100.0,
+                "description": f"ACH deposit {idx}",
+                "source": "ACH",
+                "is_external": True,
+            }
+        )
+    return rows
 
 
 def test_normalize_trade_records_rejects_duplicate_source_mapping():
@@ -556,6 +615,75 @@ def test_insert_cash_activity_dedupes_duplicate_rows_within_same_batch():
         inserted = insert_cash_activity(session, [row, row])
         assert inserted == 1
         assert session.scalar(select(func.count()).select_from(CashActivity)) == 1
+
+
+def test_insert_trade_import_large_batches_handle_reimport_and_partial_conflicts():
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        account = _setup_account(session)
+        raw_rows_1, normalized_rows_1 = _trade_import_rows(account.id, start=0, count=6000)
+
+        first = insert_trade_import(
+            session=session,
+            account_id=account.id,
+            broker="B1",
+            source_file="trades-1.csv",
+            file_sig="sig-large-1",
+            mapping_name="m1",
+            raw_rows=raw_rows_1,
+            normalized_rows=normalized_rows_1,
+        )
+        assert first == (6000, 6000)
+
+        second = insert_trade_import(
+            session=session,
+            account_id=account.id,
+            broker="B1",
+            source_file="trades-2.csv",
+            file_sig="sig-large-1",
+            mapping_name="m1",
+            raw_rows=raw_rows_1,
+            normalized_rows=normalized_rows_1,
+        )
+        assert second == (0, 0)
+
+        raw_rows_2, normalized_rows_2 = _trade_import_rows(account.id, start=3000, count=6000)
+        third = insert_trade_import(
+            session=session,
+            account_id=account.id,
+            broker="B1",
+            source_file="trades-3.csv",
+            file_sig="sig-large-2",
+            mapping_name="m1",
+            raw_rows=raw_rows_2,
+            normalized_rows=normalized_rows_2,
+        )
+        assert third == (3000, 3000)
+
+        assert session.scalar(select(func.count()).select_from(TradeRaw)) == 9000
+        assert session.scalar(select(func.count()).select_from(TradeNormalized)) == 9000
+
+
+def test_insert_cash_activity_large_batches_handle_reimport_and_partial_conflicts():
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        account = _setup_account(session)
+        rows_1 = _cash_rows(account.id, start=0, count=6000)
+
+        first = insert_cash_activity(session, rows_1)
+        second = insert_cash_activity(session, rows_1)
+        assert first == 6000
+        assert second == 0
+
+        rows_2 = _cash_rows(account.id, start=3000, count=6000)
+        third = insert_cash_activity(session, rows_2)
+        assert third == 3000
+
+        assert session.scalar(select(func.count()).select_from(CashActivity)) == 9000
 
 
 def test_delete_account_if_empty_removes_account_without_dependencies():

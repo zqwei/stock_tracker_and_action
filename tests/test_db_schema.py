@@ -114,3 +114,27 @@ def test_migrate_upgrades_legacy_sqlite_with_disposal_columns_and_indexes(tmp_pa
         "ix_feed_sources_type_provider",
         "ix_feed_items_source_published",
     }.issubset(index_names)
+
+
+def test_migrate_creates_import_path_indexes(tmp_path):
+    db_path = tmp_path / "import-path.sqlite"
+    migrate(database_url=f"sqlite:///{db_path}")
+
+    engine = create_engine(f"sqlite:///{db_path}", future=True)
+    with engine.begin() as conn:
+        index_names = {
+            row[0]
+            for row in conn.execute(
+                text("SELECT name FROM sqlite_master WHERE type = 'index'")
+            ).fetchall()
+            if row[0]
+        }
+
+    assert {
+        "ux_trades_raw_account_row_hash",
+        "ix_trades_raw_account_signature",
+        "ix_trades_norm_account_exec_id",
+        "ux_trades_norm_account_dedupe",
+        "ix_cash_activity_account_posted",
+        "ux_cash_activity_account_dedupe",
+    }.issubset(index_names)
