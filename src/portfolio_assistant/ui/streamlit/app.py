@@ -463,6 +463,31 @@ def _render_row_issues(issues: list[str], label: str) -> None:
     c2.dataframe(issue_df.head(75), use_container_width=True, hide_index=True)
 
 
+def _render_readiness_panel(
+    *,
+    steps: list[tuple[str, bool]],
+    ready_label: str,
+    pending_label: str,
+) -> None:
+    completed_steps = sum(1 for _, done in steps if done)
+    total_steps = max(len(steps), 1)
+    readiness_ratio = completed_steps / float(total_steps)
+    st.progress(readiness_ratio)
+    st.caption(
+        f"Readiness {completed_steps}/{total_steps} "
+        f"({int(readiness_ratio * 100)}%)."
+    )
+
+    for step_label, done in steps:
+        state = "done" if done else "pending"
+        st.caption(f"[{state}] {step_label}")
+
+    if completed_steps == total_steps:
+        st.success(ready_label)
+    else:
+        st.info(pending_label)
+
+
 def _render_accounts(engine, accounts: list[Account]) -> None:
     st.header("Accounts")
     st.caption("Create and manage brokerage accounts (taxable + IRA).")
@@ -736,17 +761,14 @@ def _render_import_trades(
 
     can_import = not missing and valid_count > 0
     readiness_steps = [
-        ("CSV uploaded", True),
+        ("Trade CSV uploaded", True),
         ("Required mappings complete", not missing),
         ("Normalized rows available", valid_count > 0),
     ]
-    completed_steps = sum(1 for _, done in readiness_steps if done)
-    readiness_ratio = completed_steps / float(len(readiness_steps))
-    st.progress(readiness_ratio)
-    st.caption(
-        "Import readiness "
-        f"{completed_steps}/{len(readiness_steps)} "
-        f"({int(readiness_ratio * 100)}%)."
+    _render_readiness_panel(
+        steps=readiness_steps,
+        ready_label="Ready to import. Next step: Save mapping + import trades.",
+        pending_label="Complete pending readiness steps to enable import.",
     )
 
     if not can_import:
@@ -806,6 +828,7 @@ def _render_import_trades(
                 "Duplicate rows were skipped: "
                 f"{raw_skipped} raw, {normalized_skipped} normalized."
             )
+        st.caption("Next step: continue to Import Cash or review Overview metrics.")
 
     if st.button("Next: Import Cash", key="import_trades_next_to_cash"):
         _set_nav_page("Import Cash")
@@ -926,17 +949,14 @@ def _render_import_cash(
 
     can_import = not missing and valid_count > 0
     readiness_steps = [
-        ("CSV uploaded", True),
+        ("Cash CSV uploaded", True),
         ("Required mappings complete", not missing),
-        ("Valid rows after normalization", valid_count > 0),
+        ("Valid normalized rows available", valid_count > 0),
     ]
-    completed_steps = sum(1 for _, done in readiness_steps if done)
-    readiness_ratio = completed_steps / float(len(readiness_steps))
-    st.progress(readiness_ratio)
-    st.caption(
-        "Import readiness "
-        f"{completed_steps}/{len(readiness_steps)} "
-        f"({int(readiness_ratio * 100)}%)."
+    _render_readiness_panel(
+        steps=readiness_steps,
+        ready_label="Ready to import. Next step: Import cash activity.",
+        pending_label="Complete pending readiness steps to enable import.",
     )
 
     if not can_import:
@@ -1003,6 +1023,7 @@ def _render_import_cash(
         deduped = max(len(final_rows) - inserted, 0)
         if deduped > 0:
             st.info(f"Skipped {deduped} duplicate cash rows.")
+        st.caption("Next step: go to Overview to confirm contribution totals.")
 
     if st.button("Next: Overview", key="import_cash_next_to_overview"):
         _set_nav_page("Overview")
@@ -1065,10 +1086,12 @@ def _render_overview(
     d1.metric("Imported Trade Rows", trade_rows)
     d2.metric("Imported Cash Rows", cash_rows)
     d3.metric("Symbols with Realized P&L", len(realized_rows))
-    if trade_rows == 0:
-        st.info("No trades imported yet. Use Import Trades to populate realized/unrealized analytics.")
-    if cash_rows == 0:
-        st.info("No cash activity imported yet. Use Import Cash for contribution tracking.")
+    if trade_rows == 0 or cash_rows == 0:
+        st.markdown("**Next steps**")
+        if trade_rows == 0:
+            st.markdown("- Import Trades to populate realized/unrealized analytics.")
+        if cash_rows == 0:
+            st.markdown("- Import Cash to populate contribution and cash-flow reporting.")
 
     tab_realized, tab_contrib, tab_positions = st.tabs(
         ["Realized by Symbol", "Contributions", "Open Positions"]

@@ -69,9 +69,9 @@ THEME_PRESETS: dict[str, dict[str, str]] = {
         "glow_1": "rgba(0, 0, 0, 0.0)",
         "glow_2": "rgba(0, 0, 0, 0.0)",
         "elev_shadow": "rgba(0, 0, 0, 0.74)",
-        "button_bg": "#15181c",
-        "button_bg_hover": "#1f2328",
-        "button_border": "#3a424d",
+        "button_bg": "#131518",
+        "button_bg_hover": "#1b1f24",
+        "button_border": "#434b57",
         "button_text": "#eef3f9",
         "button_shadow": "rgba(0, 0, 0, 0.76)",
     },
@@ -289,6 +289,17 @@ code, pre, kbd {
   box-shadow: none;
 }
 
+a:focus-visible,
+button:focus-visible,
+[role="button"]:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--pa-border_strong) !important;
+  outline-offset: 2px !important;
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--pa-accent) 34%, transparent) !important;
+}
+
 [data-testid="stDataFrame"], .stDataFrame {
   border: 1px solid color-mix(in oklab, var(--pa-border) 90%, transparent);
   border-radius: 12px;
@@ -402,6 +413,11 @@ BRIGHT_THEME_CSS = """
 [data-testid="stSidebar"] [data-testid="stSidebarNav"] a {
   border-color: #b4cae6 !important;
   background: rgba(255, 255, 255, 0.66) !important;
+}
+
+[data-testid="stSidebar"] [data-testid="stSidebarNav"] a span {
+  color: #0d3659 !important;
+  font-weight: 600 !important;
 }
 
 [data-testid="stSidebar"] [data-testid="stSidebarNav"] a:hover {
