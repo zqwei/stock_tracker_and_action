@@ -84,6 +84,7 @@ def test_generate_daily_briefing_writes_artifact_and_guardrails(tmp_path):
     assert payload["guardrails"]["credentials_storage"] == "forbidden"
     assert payload["guardrails"]["auto_trading"] == "forbidden"
     assert payload["account_scope"] == account_id
+    assert payload["summary_provider_requested"] == "none"
     assert payload["summary_provider"] == "none"
     assert "Local deterministic briefing:" in payload["summary_text"]
     assert payload["holdings_context"]["symbols"] == ["MSFT"]
@@ -254,6 +255,57 @@ def test_generate_daily_briefing_local_mode_does_not_call_openai(monkeypatch, tm
 
     payload = result.payload
     assert result.gpt_summary is None
+    assert payload["summary_provider_requested"] == "none"
     assert payload["summary_provider"] == "none"
     assert "Local deterministic briefing:" in payload["summary_text"]
     assert "gpt_error" not in payload
+
+
+def test_generate_daily_briefing_openai_mode_falls_back_to_local_on_client_error(
+    monkeypatch, tmp_path
+):
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        account = _seed_account(session)
+        account_id = account.id
+        session.add(
+            PositionOpen(
+                account_id=account_id,
+                instrument_type="STOCK",
+                symbol="MSFT",
+                option_symbol_raw=None,
+                quantity=2.0,
+                avg_cost=200.0,
+                last_price=198.0,
+                market_value=396.0,
+                unrealized_pnl=-4.0,
+            )
+        )
+        session.commit()
+
+    def _raise_missing_openai() -> None:
+        raise RuntimeError(
+            "openai package is not installed. Install `openai` to use openai summarizer mode."
+        )
+
+    monkeypatch.setattr(daily_briefing_module, "_build_openai_client", _raise_missing_openai)
+
+    result = generate_daily_briefing(
+        engine,
+        model="gpt-5-mini",
+        account_id=account_id,
+        include_gpt_summary=True,
+        summarizer_provider=SummarizerProvider.OPENAI,
+        output_dir=tmp_path,
+        as_of=datetime(2026, 2, 10, 9, 30, 0),
+    )
+
+    payload = result.payload
+    assert result.gpt_summary is None
+    assert payload["summary_provider_requested"] == "openai"
+    assert payload["summary_provider"] == "none"
+    assert payload["summary_fallback"] == "local_deterministic"
+    assert "Local deterministic briefing:" in payload["summary_text"]
+    assert "openai package is not installed" in payload["gpt_error"]

@@ -476,7 +476,8 @@ def generate_daily_briefing(
     }
 
     provider = _normalize_summarizer_provider(summarizer_provider)
-    payload["summary_provider"] = provider.value
+    payload["summary_provider_requested"] = provider.value
+    payload["summary_provider"] = SummarizerProvider.NONE.value
     local_summary = _build_local_summary(payload)
     payload["summary_text"] = local_summary
 
@@ -502,6 +503,7 @@ def generate_daily_briefing(
         payload["gpt_sources"] = gpt_sources
     if gpt_error:
         payload["gpt_error"] = gpt_error
+        payload["summary_fallback"] = "local_deterministic"
 
     scope = account_id or "all_accounts"
     safe_scope = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in scope)
