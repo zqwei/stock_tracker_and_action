@@ -540,3 +540,125 @@ def test_wash_sale_returns_lot_level_adjustment_ledger_and_ira_classification():
 
         replacement_rows = analysis["replacement_lot_adjustments"]
         assert len(replacement_rows) == 2
+
+
+def test_wash_sale_partial_replacement_across_year_boundary_is_allocated_correctly():
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        taxable = Account(broker="B1", account_label="Taxable", account_type="TAXABLE")
+        session.add(taxable)
+        session.flush()
+
+        session.add_all(
+            [
+                TradeNormalized(
+                    account_id=taxable.id,
+                    broker="B1",
+                    executed_at=datetime(2024, 11, 15, 10, 0, 0),
+                    instrument_type="STOCK",
+                    symbol="AAPL",
+                    side="BUY",
+                    quantity=10,
+                    price=100.0,
+                    fees=0.0,
+                    net_amount=-1000.0,
+                    multiplier=1,
+                    currency="USD",
+                ),
+                TradeNormalized(
+                    account_id=taxable.id,
+                    broker="B1",
+                    executed_at=datetime(2025, 12, 15, 10, 0, 0),
+                    instrument_type="STOCK",
+                    symbol="AAPL",
+                    side="SELL",
+                    quantity=10,
+                    price=90.0,
+                    fees=0.0,
+                    net_amount=900.0,
+                    multiplier=1,
+                    currency="USD",
+                ),
+                TradeNormalized(
+                    account_id=taxable.id,
+                    broker="B1",
+                    executed_at=datetime(2025, 12, 20, 10, 0, 0),
+                    instrument_type="STOCK",
+                    symbol="AAPL",
+                    side="BUY",
+                    quantity=3,
+                    price=91.0,
+                    fees=0.0,
+                    net_amount=-273.0,
+                    multiplier=1,
+                    currency="USD",
+                ),
+                TradeNormalized(
+                    account_id=taxable.id,
+                    broker="B1",
+                    executed_at=datetime(2026, 1, 10, 10, 0, 0),
+                    instrument_type="STOCK",
+                    symbol="AAPL",
+                    side="BUY",
+                    quantity=2,
+                    price=92.0,
+                    fees=0.0,
+                    net_amount=-184.0,
+                    multiplier=1,
+                    currency="USD",
+                ),
+            ]
+        )
+        session.flush()
+
+        recompute_pnl(session)
+        session.commit()
+
+        analysis = estimate_wash_sale_disallowance(session, mode="irs")
+        assert isclose(float(analysis["total_disallowed_loss"]), 50.0, rel_tol=0.0, abs_tol=1e-9)
+        assert len(analysis["sales"]) == 1
+
+        sale = analysis["sales"][0]
+        assert sale["sale_date"] == "2025-12-15"
+        assert isclose(
+            float(sale["matched_replacement_quantity_equiv"]),
+            5.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+        assert isclose(
+            float(sale["unmatched_replacement_quantity_equiv"]),
+            5.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+
+        matches = sale["matches"]
+        assert len(matches) == 2
+        assert [row["buy_date"] for row in matches] == ["2025-12-20", "2026-01-10"]
+        assert isclose(
+            float(matches[0]["allocated_replacement_quantity_equiv"]),
+            3.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+        assert isclose(
+            float(matches[1]["allocated_replacement_quantity_equiv"]),
+            2.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+        assert isclose(
+            float(matches[0]["allocated_disallowed_loss"]),
+            30.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+        assert isclose(
+            float(matches[1]["allocated_disallowed_loss"]),
+            20.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
