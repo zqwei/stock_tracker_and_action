@@ -91,6 +91,39 @@ SQLITE_REDUNDANT_INDEXES = [
 
 BACKFILL_LOOKUP_CHUNK_SIZE = 800
 
+SQLITE_IMPORT_INDEX_EXPECTATIONS: dict[str, dict[str, object]] = {
+    "ux_trades_raw_account_row_hash": {
+        "table": "trades_raw",
+        "columns": ("account_id", "row_hash"),
+        "unique": True,
+    },
+    "ux_trades_norm_account_dedupe": {
+        "table": "trades_normalized",
+        "columns": ("account_id", "dedupe_key"),
+        "unique": True,
+    },
+    "ux_cash_activity_account_dedupe": {
+        "table": "cash_activity",
+        "columns": ("account_id", "dedupe_key"),
+        "unique": True,
+    },
+    "ix_trades_raw_account_signature": {
+        "table": "trades_raw",
+        "columns": ("account_id", "file_signature"),
+        "unique": False,
+    },
+    "ix_trades_norm_account_exec_id": {
+        "table": "trades_normalized",
+        "columns": ("account_id", "executed_at", "id"),
+        "unique": False,
+    },
+    "ix_cash_activity_account_posted": {
+        "table": "cash_activity",
+        "columns": ("account_id", "posted_at"),
+        "unique": False,
+    },
+}
+
 
 def _enable_sqlite_pragmas(engine: Engine) -> None:
     @event.listens_for(engine, "connect")
@@ -142,6 +175,80 @@ def _drop_sqlite_redundant_indexes(engine: Engine) -> None:
     with engine.begin() as conn:
         for statement in SQLITE_REDUNDANT_INDEXES:
             conn.execute(text(statement))
+
+
+def _sqlite_index_signature(
+    conn,
+    *,
+    table_name: str,
+    index_name: str,
+) -> tuple[bool, tuple[str, ...]] | None:
+    pragma_rows = conn.execute(
+        text(f"PRAGMA index_list('{table_name}')")  # noqa: S608
+    ).mappings()
+    index_row = next((row for row in pragma_rows if row.get("name") == index_name), None)
+    if index_row is None:
+        return None
+
+    unique = bool(int(index_row.get("unique") or 0))
+    columns = tuple(
+        str(row.get("name"))
+        for row in conn.execute(
+            text(f"PRAGMA index_info('{index_name}')")  # noqa: S608
+        ).mappings()
+        if row.get("name") is not None
+    )
+    return unique, columns
+
+
+def _reconcile_sqlite_index_drift(engine: Engine) -> None:
+    if engine.dialect.name != "sqlite":
+        return
+
+    with engine.begin() as conn:
+        for index_name, spec in SQLITE_IMPORT_INDEX_EXPECTATIONS.items():
+            actual = _sqlite_index_signature(
+                conn,
+                table_name=str(spec["table"]),
+                index_name=index_name,
+            )
+            if actual is None:
+                continue
+            unique, columns = actual
+            expected_unique = bool(spec["unique"])
+            expected_columns = tuple(str(col) for col in spec["columns"])
+            if unique == expected_unique and columns == expected_columns:
+                continue
+            conn.execute(text(f"DROP INDEX IF EXISTS {index_name}"))  # noqa: S608
+
+
+def _assert_sqlite_import_index_integrity(engine: Engine) -> None:
+    if engine.dialect.name != "sqlite":
+        return
+
+    errors: list[str] = []
+    with engine.begin() as conn:
+        for index_name, spec in SQLITE_IMPORT_INDEX_EXPECTATIONS.items():
+            actual = _sqlite_index_signature(
+                conn,
+                table_name=str(spec["table"]),
+                index_name=index_name,
+            )
+            if actual is None:
+                errors.append(f"{index_name} missing")
+                continue
+            unique, columns = actual
+            expected_unique = bool(spec["unique"])
+            expected_columns = tuple(str(col) for col in spec["columns"])
+            if unique != expected_unique or columns != expected_columns:
+                errors.append(
+                    f"{index_name} drifted: unique={unique}, columns={columns}, "
+                    f"expected unique={expected_unique}, columns={expected_columns}"
+                )
+
+    if errors:
+        details = "; ".join(errors)
+        raise RuntimeError(f"SQLite import index integrity check failed: {details}")
 
 
 def _backfill_nullable_unique_key(
@@ -379,7 +486,9 @@ def migrate(database_url: str | None = None) -> Engine:
     _backfill_sqlite_dedupe_columns(engine)
     _dedupe_sqlite_rows_for_unique_keys(engine)
     _drop_sqlite_redundant_indexes(engine)
+    _reconcile_sqlite_index_drift(engine)
     _ensure_sqlite_indexes(engine)
+    _assert_sqlite_import_index_integrity(engine)
     return engine
 
 
