@@ -486,6 +486,10 @@ def _render_import_trades(
 ) -> None:
     st.header("Import Trades")
     st.caption("Upload trade CSV, map columns once, and import normalized rows.")
+    st.info(
+        "Workflow: select account -> upload CSV -> complete required mappings -> "
+        "review normalized rows -> import + recompute analytics."
+    )
 
     if not accounts:
         st.warning("Add at least one account before importing trades.")
@@ -625,6 +629,20 @@ def _render_import_trades(
     c_skipped.metric("Skipped rows", skipped_count)
 
     can_import = not missing and valid_count > 0
+    readiness_steps = [
+        ("CSV uploaded", True),
+        ("Required mappings complete", not missing),
+        ("Normalized rows available", valid_count > 0),
+    ]
+    completed_steps = sum(1 for _, done in readiness_steps if done)
+    readiness_ratio = completed_steps / float(len(readiness_steps))
+    st.progress(readiness_ratio)
+    st.caption(
+        "Import readiness "
+        f"{completed_steps}/{len(readiness_steps)} "
+        f"({int(readiness_ratio * 100)}%)."
+    )
+
     if not can_import:
         if missing:
             st.info("Complete required mappings to enable import.")
@@ -694,6 +712,10 @@ def _render_import_cash(
 ) -> None:
     st.header("Import Cash")
     st.caption("Upload cash CSV, map columns, and tag external transfers before import.")
+    st.info(
+        "Workflow: select account -> upload cash CSV -> map required fields -> "
+        "verify external transfer tags -> import."
+    )
 
     if not accounts:
         st.warning("Add at least one account before importing cash activity.")
@@ -797,6 +819,20 @@ def _render_import_cash(
     c_skipped.metric("Skipped rows", skipped_count)
 
     can_import = not missing and valid_count > 0
+    readiness_steps = [
+        ("CSV uploaded", True),
+        ("Required mappings complete", not missing),
+        ("Valid rows after normalization", valid_count > 0),
+    ]
+    completed_steps = sum(1 for _, done in readiness_steps if done)
+    readiness_ratio = completed_steps / float(len(readiness_steps))
+    st.progress(readiness_ratio)
+    st.caption(
+        "Import readiness "
+        f"{completed_steps}/{len(readiness_steps)} "
+        f"({int(readiness_ratio * 100)}%)."
+    )
+
     if not can_import:
         if missing:
             st.info("Complete required mappings to enable cash import.")
@@ -887,13 +923,21 @@ def _render_overview(
     with Session(engine) as session:
         realized_stmt = select(func.coalesce(func.sum(PnlRealized.pnl), 0.0))
         unrealized_stmt = select(func.coalesce(func.sum(PositionOpen.unrealized_pnl), 0.0))
+        trade_count_stmt = select(func.count()).select_from(TradeNormalized)
+        cash_count_stmt = select(func.count()).select_from(CashActivity)
         if account_filter_id:
             realized_stmt = realized_stmt.where(PnlRealized.account_id == account_filter_id)
             unrealized_stmt = unrealized_stmt.where(PositionOpen.account_id == account_filter_id)
+            trade_count_stmt = trade_count_stmt.where(
+                TradeNormalized.account_id == account_filter_id
+            )
+            cash_count_stmt = cash_count_stmt.where(CashActivity.account_id == account_filter_id)
 
         realized_total = float(session.scalar(realized_stmt) or 0.0)
         unrealized_total = float(session.scalar(unrealized_stmt) or 0.0)
         contributions_total = net_contributions(session, account_id=account_filter_id)
+        trade_rows = int(session.scalar(trade_count_stmt) or 0)
+        cash_rows = int(session.scalar(cash_count_stmt) or 0)
 
         realized_rows = realized_by_symbol(session, account_id=account_filter_id)
         contrib_rows = contributions_by_month(session, account_id=account_filter_id)
@@ -910,6 +954,15 @@ def _render_overview(
     c3.metric("Unrealized P&L", _money(unrealized_total))
     c4.metric("Net Contributions", _money(contributions_total))
     c5.metric("Open Positions", len(positions))
+
+    d1, d2, d3 = st.columns(3)
+    d1.metric("Imported Trade Rows", trade_rows)
+    d2.metric("Imported Cash Rows", cash_rows)
+    d3.metric("Symbols with Realized P&L", len(realized_rows))
+    if trade_rows == 0:
+        st.info("No trades imported yet. Use Import Trades to populate realized/unrealized analytics.")
+    if cash_rows == 0:
+        st.info("No cash activity imported yet. Use Import Cash for contribution tracking.")
 
     tab_realized, tab_contrib, tab_positions = st.tabs(
         ["Realized by Symbol", "Contributions", "Open Positions"]
