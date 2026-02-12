@@ -2,6 +2,7 @@ pandas
 numpy
 pydantic
 sqlalchemy>=2.0
-streamlit
+streamlit>=1.31,<2
+protobuf>=4.25,<6
 python-dateutil
 requests
