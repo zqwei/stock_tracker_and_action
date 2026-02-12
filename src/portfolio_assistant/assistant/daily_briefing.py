@@ -370,24 +370,60 @@ def _briefing_instructions() -> str:
     )
 
 
-def _build_local_summary(payload: dict[str, Any]) -> str:
+def _safe_float(value: Any, *, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(value: Any, *, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return default
+
+
+def _local_summary_metrics(payload: dict[str, Any]) -> dict[str, Any]:
     snapshot = payload.get("snapshot") or {}
-    checks = payload.get("risk_checks") or []
+    checks_raw = payload.get("risk_checks") or []
+    checks = checks_raw if isinstance(checks_raw, list) else []
     holdings_context = payload.get("holdings_context") or {}
+    holdings_symbols = holdings_context.get("symbols") or []
+    symbols = holdings_symbols if isinstance(holdings_symbols, list) else []
     holdings_updates = payload.get("holdings_updates") or {}
 
-    total_pnl = float(snapshot.get("total_pnl", 0.0) or 0.0)
-    open_positions = int(snapshot.get("open_positions", 0) or 0)
-    symbols = holdings_context.get("symbols") or []
-    high_severity = sum(1 for row in checks if str(row.get("severity")) == "high")
-    update_items = int(holdings_updates.get("item_count", 0) or 0)
+    return {
+        "total_pnl": _safe_float(snapshot.get("total_pnl", 0.0)),
+        "open_positions": max(_safe_int(snapshot.get("open_positions", 0)), 0),
+        "holdings_symbol_count": len(symbols),
+        "risk_check_total": len(checks),
+        "risk_check_high": sum(
+            1 for row in checks if isinstance(row, dict) and str(row.get("severity")) == "high"
+        ),
+        "rss_item_count": max(_safe_int(holdings_updates.get("item_count", 0)), 0),
+    }
 
-    direction = "gain" if total_pnl >= 0 else "loss"
+
+def _build_local_summary(payload: dict[str, Any]) -> str:
+    metrics = _local_summary_metrics(payload)
+    total_pnl = float(metrics["total_pnl"])
+    direction = "flat"
+    if total_pnl > 0:
+        direction = "gain"
+    elif total_pnl < 0:
+        direction = "loss"
+
     return (
         "Local deterministic briefing: "
         f"{direction} profile with total P&L {total_pnl:,.2f}, "
-        f"{open_positions} open position(s) across {len(symbols)} holdings symbol(s), "
-        f"{high_severity} high-severity risk check(s), and {update_items} holdings-linked RSS item(s). "
+        f"{metrics['open_positions']} open position(s) across "
+        f"{metrics['holdings_symbol_count']} holdings symbol(s), "
+        f"{metrics['risk_check_high']} high-severity risk check(s), and "
+        f"{metrics['rss_item_count']} holdings-linked RSS item(s). "
         "Educational only, not financial or tax advice."
     )
 
@@ -478,6 +514,8 @@ def generate_daily_briefing(
     provider = _normalize_summarizer_provider(summarizer_provider)
     payload["summary_provider_requested"] = provider.value
     payload["summary_provider"] = SummarizerProvider.NONE.value
+    payload["summary_status"] = "local_deterministic"
+    payload["summary_metrics"] = _local_summary_metrics(payload)
     local_summary = _build_local_summary(payload)
     payload["summary_text"] = local_summary
 
@@ -497,6 +535,7 @@ def generate_daily_briefing(
 
     if gpt_summary:
         payload["summary_provider"] = SummarizerProvider.OPENAI.value
+        payload["summary_status"] = "openai_success"
         payload["summary_text"] = gpt_summary
         payload["gpt_summary"] = gpt_summary
     if gpt_sources:
@@ -504,6 +543,7 @@ def generate_daily_briefing(
     if gpt_error:
         payload["gpt_error"] = gpt_error
         payload["summary_fallback"] = "local_deterministic"
+        payload["summary_status"] = "openai_fallback"
 
     scope = account_id or "all_accounts"
     safe_scope = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in scope)
