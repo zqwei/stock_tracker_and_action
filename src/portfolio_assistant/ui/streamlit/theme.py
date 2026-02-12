@@ -7,27 +7,27 @@ DEFAULT_THEME_PRESET = "deep_dark"
 
 THEME_PRESETS: dict[str, dict[str, str]] = {
     "bright": {
-        "bg_0": "#f8fbff",
-        "bg_1": "#edf5ff",
-        "bg_2": "#e2ecfb",
-        "surface": "rgba(255, 255, 255, 0.97)",
-        "sidebar_bg": "rgba(241, 247, 255, 0.98)",
-        "header_bg": "rgba(248, 252, 255, 0.96)",
-        "border": "rgba(53, 93, 132, 0.30)",
-        "border_strong": "rgba(16, 115, 234, 0.72)",
-        "text_strong": "#0a2137",
-        "text": "#153654",
-        "text_muted": "#365a7b",
-        "accent": "#1073ea",
-        "accent_2": "#00a88f",
-        "glow_1": "rgba(16, 115, 234, 0.14)",
-        "glow_2": "rgba(0, 168, 143, 0.12)",
-        "elev_shadow": "rgba(18, 42, 66, 0.12)",
-        "button_bg": "#edf4ff",
-        "button_bg_hover": "#e0ecff",
-        "button_border": "#4b8ee0",
-        "button_text": "#0f2f4d",
-        "button_shadow": "rgba(34, 82, 126, 0.14)",
+        "bg_0": "#edf4ff",
+        "bg_1": "#e2ecff",
+        "bg_2": "#d4e1f7",
+        "surface": "rgba(255, 255, 255, 0.98)",
+        "sidebar_bg": "rgba(228, 238, 253, 0.98)",
+        "header_bg": "rgba(239, 246, 255, 0.96)",
+        "border": "rgba(23, 72, 116, 0.40)",
+        "border_strong": "rgba(7, 89, 186, 0.86)",
+        "text_strong": "#071e34",
+        "text": "#0f3454",
+        "text_muted": "#2b557a",
+        "accent": "#0b6ce3",
+        "accent_2": "#0f8c85",
+        "glow_1": "rgba(11, 108, 227, 0.18)",
+        "glow_2": "rgba(15, 140, 133, 0.12)",
+        "elev_shadow": "rgba(14, 36, 64, 0.16)",
+        "button_bg": "#dbe9ff",
+        "button_bg_hover": "#cfe2ff",
+        "button_border": "#2e73bf",
+        "button_text": "#0a2d4d",
+        "button_shadow": "rgba(24, 61, 95, 0.20)",
     },
     "dark": {
         "bg_0": "#0b131d",
@@ -69,11 +69,11 @@ THEME_PRESETS: dict[str, dict[str, str]] = {
         "glow_1": "rgba(0, 0, 0, 0.0)",
         "glow_2": "rgba(0, 0, 0, 0.0)",
         "elev_shadow": "rgba(0, 0, 0, 0.74)",
-        "button_bg": "#000000",
-        "button_bg_hover": "#060606",
-        "button_border": "#2f9fc7",
-        "button_text": "#eaf6ff",
-        "button_shadow": "rgba(0, 0, 0, 0.7)",
+        "button_bg": "#15181c",
+        "button_bg_hover": "#1f2328",
+        "button_border": "#3a424d",
+        "button_text": "#eef3f9",
+        "button_shadow": "rgba(0, 0, 0, 0.76)",
     },
     "palenight": {
         "bg_0": "#171726",
@@ -393,6 +393,155 @@ button[aria-label^="Help for"] svg {
 </style>
 """
 
+BRIGHT_THEME_CSS = """
+<style>
+[data-testid="stSidebar"] {
+  background: linear-gradient(180deg, #eaf1fd 0%, #e2ebfb 100%) !important;
+}
+
+[data-testid="stSidebar"] [data-testid="stSidebarNav"] a {
+  border-color: #b4cae6 !important;
+  background: rgba(255, 255, 255, 0.66) !important;
+}
+
+[data-testid="stSidebar"] [data-testid="stSidebarNav"] a:hover {
+  border-color: #2f75bf !important;
+  background: #ffffff !important;
+}
+
+[data-testid="stSidebar"] [data-testid="stSidebarNav"] a[aria-current="page"] {
+  border-color: #085bbc !important;
+  background: linear-gradient(120deg, #d6e7ff 0%, #dff9f4 100%) !important;
+}
+
+[data-testid="metric-container"] {
+  background: rgba(255, 255, 255, 0.98) !important;
+  border-color: #a8c1df !important;
+}
+
+.stButton > button,
+[data-testid="stDownloadButton"] > button,
+[data-testid="stFormSubmitButton"] > button {
+  background: linear-gradient(180deg, #ffffff 0%, #d8e7ff 100%) !important;
+  border-color: #2e72bb !important;
+  color: #082a48 !important;
+  box-shadow: 0 8px 18px rgba(22, 64, 106, 0.2) !important;
+}
+
+.stButton > button:hover,
+[data-testid="stDownloadButton"] > button:hover,
+[data-testid="stFormSubmitButton"] > button:hover {
+  background: linear-gradient(180deg, #f8fbff 0%, #c7dcff 100%) !important;
+  border-color: #074f9f !important;
+}
+
+div[data-baseweb="select"] > div,
+div[data-baseweb="input"] > div,
+textarea,
+[data-testid="stDataEditor"] input {
+  background: #ffffff !important;
+  border: 1px solid #92b1d2 !important;
+  color: #0d3659 !important;
+}
+
+div[data-baseweb="select"] svg,
+div[data-baseweb="input"] svg {
+  color: #1f4f7f !important;
+}
+
+div[data-baseweb="select"] [role="combobox"],
+div[data-baseweb="input"] input,
+textarea {
+  color: #0d3659 !important;
+}
+
+div[data-baseweb="select"] input::placeholder,
+div[data-baseweb="input"] input::placeholder,
+textarea::placeholder {
+  color: #5a7ea3 !important;
+  opacity: 1 !important;
+}
+
+[data-testid="stDataFrame"],
+.stDataFrame {
+  background: #ffffff !important;
+  border-color: #97b5d7 !important;
+}
+
+[data-testid="stDataFrame"] [role="columnheader"],
+[data-testid="stDataFrame"] [role="rowheader"] {
+  background: #dce9fb !important;
+  color: #123d63 !important;
+  font-weight: 700 !important;
+}
+
+[data-testid="stDataFrame"] [role="gridcell"],
+[data-testid="stDataFrame"] [role="cell"] {
+  background: #ffffff !important;
+  color: #123d63 !important;
+}
+
+[data-testid="stForm"] {
+  background: rgba(255, 255, 255, 0.98) !important;
+  border-color: #9dbbdd !important;
+}
+
+[data-testid="stAlertContainer"] {
+  border-radius: 12px !important;
+}
+
+[data-testid="stAlertContainer"] p {
+  font-weight: 600 !important;
+}
+
+[data-testid="stAlertContainer"]:has([data-testid="stAlertContentInfo"]) {
+  background: #eaf4ff !important;
+  border-color: #4f8ccb !important;
+}
+
+[data-testid="stAlertContainer"]:has([data-testid="stAlertContentInfo"]) p {
+  color: #0f3659 !important;
+}
+
+[data-testid="stAlertContainer"]:has([data-testid="stAlertContentSuccess"]) {
+  background: #e9f8ee !important;
+  border-color: #3f9a64 !important;
+}
+
+[data-testid="stAlertContainer"]:has([data-testid="stAlertContentSuccess"]) p {
+  color: #194f2f !important;
+}
+
+[data-testid="stAlertContainer"]:has([data-testid="stAlertContentWarning"]) {
+  background: #fff4da !important;
+  border-color: #d5972f !important;
+}
+
+[data-testid="stAlertContainer"]:has([data-testid="stAlertContentWarning"]) p {
+  color: #5d3d03 !important;
+}
+
+[data-testid="stAlertContainer"]:has([data-testid="stAlertContentError"]) {
+  background: #ffeae8 !important;
+  border-color: #d36b5f !important;
+}
+
+[data-testid="stAlertContainer"]:has([data-testid="stAlertContentError"]) p {
+  color: #6e221e !important;
+}
+
+[data-testid="stFileUploaderDropzone"] {
+  background: #f7fbff !important;
+  border-color: #4f8ccb !important;
+}
+
+[data-testid="stFileUploaderDropzone"] p,
+[data-testid="stFileUploaderDropzone"] small {
+  color: #124063 !important;
+}
+</style>
+"""
+
 
 def _resolve_theme_key(theme_key: str | None = None) -> str:
     requested = (theme_key or "").strip().lower()
@@ -410,6 +559,12 @@ def _resolve_theme_key(theme_key: str | None = None) -> str:
 def _root_vars(theme_key: str) -> str:
     preset = THEME_PRESETS[theme_key]
     return "".join(f"  --pa-{name}: {value};\n" for name, value in preset.items())
+
+
+def _theme_specific_css(theme_key: str) -> str:
+    if theme_key == "bright":
+        return BRIGHT_THEME_CSS
+    return ""
 
 
 def render_theme_selector() -> str:
@@ -430,4 +585,5 @@ def render_theme_selector() -> str:
 def apply_futuristic_theme(theme_key: str | None = None) -> None:
     resolved = _resolve_theme_key(theme_key)
     css = THEME_CSS_TEMPLATE.replace("__ROOT_VARS__", _root_vars(resolved))
+    css += _theme_specific_css(resolved)
     st.markdown(css, unsafe_allow_html=True)

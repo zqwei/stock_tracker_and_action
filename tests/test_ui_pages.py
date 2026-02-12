@@ -20,10 +20,12 @@ from portfolio_assistant.ui.streamlit.views.pnl import (
     realized_summary_dataframe,
 )
 from portfolio_assistant.ui.streamlit.views.reconciliation import (
+    build_reconciliation_packet_zip,
     checklist_dataframe,
     comparison_dataframe,
     diff_table_by_key,
     normalize_broker_dataframe,
+    reconciliation_health,
 )
 from portfolio_assistant.ui.streamlit.views.settings import (
     account_catalog_dataframe,
@@ -171,6 +173,22 @@ def test_tax_year_and_reconciliation_helpers(db_session, seeded_two_account_acti
             "flagged",
         ].iloc[0]
     )
+
+    health = reconciliation_health(comparison_frame)
+    assert not bool(health["in_sync"])
+    assert int(health["mismatch_metrics"]) >= 1
+
+    packet = build_reconciliation_packet_zip(
+        app_summary_frame=app_summary,
+        app_detail_frame=app_detail,
+        comparison_frame=comparison_frame,
+        checklist_frame=checklist,
+        broker_detail_frame=broker_detail,
+        symbol_diff=symbol_diff,
+        date_diff=diff_table_by_key(app_detail, broker_detail, "date_sold"),
+        term_diff=diff_table_by_key(app_detail, broker_detail, "term"),
+    )
+    assert packet[:2] == b"PK"
 
 
 def test_settings_helpers_and_csv_bytes(db_session, seeded_two_account_activity):

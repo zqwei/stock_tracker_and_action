@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from datetime import date
+import io
 from typing import Any
+import zipfile
 
 import pandas as pd
 import streamlit as st
@@ -147,6 +149,54 @@ def comparison_dataframe(comparison: dict[str, dict[str, float]]) -> pd.DataFram
     return frame
 
 
+def reconciliation_health(
+    comparison_frame: pd.DataFrame, *, tolerance: float = 1e-6
+) -> dict[str, float | int | bool]:
+    if comparison_frame.empty:
+        return {
+            "in_sync": True,
+            "max_abs_delta": 0.0,
+            "mismatch_metrics": 0,
+        }
+
+    delta_series = pd.to_numeric(comparison_frame["delta"], errors="coerce").fillna(0.0)
+    max_abs_delta = float(delta_series.abs().max())
+    mismatch_metrics = int((delta_series.abs() > tolerance).sum())
+    return {
+        "in_sync": mismatch_metrics == 0,
+        "max_abs_delta": max_abs_delta,
+        "mismatch_metrics": mismatch_metrics,
+    }
+
+
+def build_reconciliation_packet_zip(
+    *,
+    app_summary_frame: pd.DataFrame,
+    app_detail_frame: pd.DataFrame,
+    comparison_frame: pd.DataFrame,
+    checklist_frame: pd.DataFrame,
+    broker_detail_frame: pd.DataFrame,
+    symbol_diff: pd.DataFrame,
+    date_diff: pd.DataFrame,
+    term_diff: pd.DataFrame,
+) -> bytes:
+    file_map = {
+        "app_summary.csv": app_summary_frame,
+        "app_8949_like_detail.csv": app_detail_frame,
+        "totals_comparison.csv": comparison_frame,
+        "broker_rows_normalized.csv": broker_detail_frame,
+        "diff_by_symbol.csv": symbol_diff,
+        "diff_by_sale_date.csv": date_diff,
+        "diff_by_term.csv": term_diff,
+        "reconciliation_checklist.csv": checklist_frame,
+    }
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for filename, frame in file_map.items():
+            archive.writestr(filename, frame.to_csv(index=False))
+    return buffer.getvalue()
+
+
 def _safe_groupby_sum(frame: pd.DataFrame, key_column: str) -> pd.Series:
     if frame.empty or key_column not in frame.columns:
         return pd.Series(dtype=float)
@@ -240,6 +290,10 @@ def render_page() -> None:
     apply_page_theme()
     st.header("Reconciliation")
     st.caption("Compare app tax-year totals against broker totals, then drill into differences.")
+    st.info(
+        "Recommended flow: verify app totals -> load broker totals -> inspect symbol/date/term "
+        "deltas -> review mismatch checklist -> export a reconciliation packet."
+    )
 
     engine = initialize_engine()
     accounts = load_accounts(engine)
@@ -326,8 +380,38 @@ def render_page() -> None:
     comparison = compare_totals(app_totals, broker_totals)
     comparison_frame = comparison_dataframe(comparison)
     checklist_frame = checklist_dataframe(report, comparison, app_detail_frame)
+    health = reconciliation_health(comparison_frame)
 
-    c1, c2, c3 = st.columns(3)
+    symbol_diff = pd.DataFrame(
+        columns=["symbol", "app_gain_or_loss", "broker_gain_or_loss", "delta"]
+    )
+    date_diff = pd.DataFrame(
+        columns=["date_sold", "app_gain_or_loss", "broker_gain_or_loss", "delta"]
+    )
+    term_diff = pd.DataFrame(
+        columns=["term", "app_gain_or_loss", "broker_gain_or_loss", "delta"]
+    )
+    if not broker_detail_frame.empty:
+        symbol_diff = diff_table_by_key(app_detail_frame, broker_detail_frame, "symbol")
+        date_diff = diff_table_by_key(app_detail_frame, broker_detail_frame, "date_sold")
+        term_diff = diff_table_by_key(app_detail_frame, broker_detail_frame, "term")
+
+    packet_bytes = build_reconciliation_packet_zip(
+        app_summary_frame=app_summary_frame,
+        app_detail_frame=app_detail_frame,
+        comparison_frame=comparison_frame,
+        checklist_frame=checklist_frame,
+        broker_detail_frame=broker_detail_frame,
+        symbol_diff=symbol_diff,
+        date_diff=date_diff,
+        term_diff=term_diff,
+    )
+    packet_scope = (
+        "all_accounts" if account_filter_id is None else account_filter_id.replace("-", "")
+    )
+    packet_name = f"reconciliation_packet_{tax_year}_{packet_scope}.zip"
+
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric(
         "App Gain/Loss",
         money(float(app_totals.get("total_gain_or_loss", 0.0) or 0.0)),
@@ -339,6 +423,22 @@ def render_page() -> None:
     c3.metric(
         "Gain/Loss Delta",
         money(float(comparison.get("total_gain_or_loss", {}).get("delta", 0.0) or 0.0)),
+    )
+    c4.metric("Metrics with Delta", int(health["mismatch_metrics"]))
+    c5.metric("Max Absolute Delta", money(float(health["max_abs_delta"])))
+
+    if bool(health["in_sync"]):
+        st.success("App and broker totals are aligned within tolerance.")
+    else:
+        st.warning("Differences detected. Use Diff Drilldowns and Checklist to reconcile.")
+
+    st.download_button(
+        label="Download reconciliation packet (.zip)",
+        data=packet_bytes,
+        file_name=packet_name,
+        mime="application/zip",
+        key="download_reconciliation_packet_zip",
+        use_container_width=True,
     )
 
     tab_totals, tab_diffs, tab_checklist = st.tabs(
@@ -383,10 +483,6 @@ def render_page() -> None:
         if broker_detail_frame.empty:
             st.info("Upload broker CSV rows to enable symbol/date/term drilldowns.")
         else:
-            symbol_diff = diff_table_by_key(app_detail_frame, broker_detail_frame, "symbol")
-            date_diff = diff_table_by_key(app_detail_frame, broker_detail_frame, "date_sold")
-            term_diff = diff_table_by_key(app_detail_frame, broker_detail_frame, "term")
-
             st.markdown("**Diff by symbol**")
             st.dataframe(symbol_diff, use_container_width=True, hide_index=True)
             csv_download(
