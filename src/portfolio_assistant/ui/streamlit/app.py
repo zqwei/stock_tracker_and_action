@@ -46,7 +46,7 @@ from portfolio_assistant.assistant.tools_db import (
     list_accounts,
 )
 from portfolio_assistant.config.paths import ensure_data_dirs
-from portfolio_assistant.config.settings import get_settings
+from portfolio_assistant.config.settings import SummarizerProvider, get_settings
 from portfolio_assistant.db.migrate import migrate
 from portfolio_assistant.db.models import (
     Account,
@@ -1657,18 +1657,24 @@ def _render_ask_gpt(engine, account_filter_id: str | None) -> None:
 def _render_daily_briefings(engine, account_filter_id: str | None) -> None:
     settings = get_settings()
     st.header("Daily Briefings")
-    st.caption("Deterministic risk checks with optional GPT narrative layer.")
+    st.caption("Deterministic risk checks with optional AI narrative layer.")
     st.info(
         "Pipeline scaffold only. No credential collection and no trade execution. Educational use only."
     )
 
-    can_use_gpt = _openai_key_configured()
+    provider_is_openai = settings.summarizer_provider == SummarizerProvider.OPENAI
+    can_use_gpt = provider_is_openai and _openai_key_configured()
     include_gpt = st.checkbox(
         "Add GPT narrative summary",
         value=False,
-        disabled=not can_use_gpt,
+        disabled=not provider_is_openai or not can_use_gpt,
     )
-    if not can_use_gpt:
+    if not provider_is_openai:
+        st.caption(
+            "Summarizer provider is `none` (local-only default). "
+            "Set `SUMMARIZER_PROVIDER=openai` to enable optional AI summaries."
+        )
+    elif not can_use_gpt:
         st.caption("Set `OPENAI_API_KEY` to enable GPT narrative summaries.")
 
     include_web = False
@@ -1687,6 +1693,7 @@ def _render_daily_briefings(engine, account_filter_id: str | None) -> None:
                     account_id=account_filter_id,
                     include_gpt_summary=include_gpt,
                     enable_web_context=include_web,
+                    summarizer_provider=settings.summarizer_provider,
                 )
                 st.session_state["daily_briefing_last_result"] = result
             except Exception as exc:
@@ -1714,6 +1721,13 @@ def _render_daily_briefings(engine, account_filter_id: str | None) -> None:
         st.subheader("Protective Actions")
         for action in actions:
             st.markdown(f"- {action}")
+
+        summary_text = str(payload.get("summary_text") or "").strip()
+        summary_provider = str(payload.get("summary_provider") or "none")
+        if summary_text:
+            st.subheader("Summary")
+            st.markdown(summary_text)
+            st.caption(f"Summary provider: `{summary_provider}`")
 
         if result.gpt_summary:
             st.subheader("GPT Narrative")

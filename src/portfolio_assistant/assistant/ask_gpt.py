@@ -4,9 +4,8 @@ import json
 import os
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
-from openai import OpenAI
 from sqlalchemy import case, func, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
@@ -19,6 +18,9 @@ from portfolio_assistant.db.models import (
     PositionOpen,
     TradeNormalized,
 )
+
+if TYPE_CHECKING:
+    from openai import OpenAI
 
 MAX_TOOL_ROWS = 200
 DEFAULT_TOOL_ROWS = 50
@@ -400,10 +402,16 @@ def build_read_only_tool_specs() -> list[dict[str, Any]]:
     ]
 
 
-def build_openai_client() -> OpenAI:
+def build_openai_client() -> Any:
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured.")
+    try:
+        from openai import OpenAI
+    except ImportError as exc:
+        raise RuntimeError(
+            "openai package is not installed. Install `openai` to enable Ask GPT."
+        ) from exc
     return OpenAI(api_key=api_key)
 
 
@@ -549,7 +557,7 @@ def ask_portfolio_question(
     model: str,
     account_scope_id: str | None = None,
     web_enabled: bool = False,
-    client: OpenAI | None = None,
+    client: Any | None = None,
 ) -> AskGptResult:
     query = str(question or "").strip()
     if not query:
