@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-from sqlalchemy import create_engine, inspect, text
+from datetime import datetime
+
+from sqlalchemy import create_engine, func, inspect, select, text
+from sqlalchemy.orm import Session
 
 from portfolio_assistant.db.migrate import migrate
-from portfolio_assistant.db.models import Base
+from portfolio_assistant.db.models import Account, Base, CashActivity, TradeNormalized, TradeRaw
 
 
 def test_schema_has_tax_recon_and_feed_tables():
@@ -138,3 +141,115 @@ def test_migrate_creates_import_path_indexes(tmp_path):
         "ix_cash_activity_account_posted",
         "ux_cash_activity_account_dedupe",
     }.issubset(index_names)
+
+
+def test_migrate_backfills_and_dedupes_null_keys_when_unique_indexes_already_exist(tmp_path):
+    db_path = tmp_path / "backfill-existing-unique.sqlite"
+    engine = create_engine(f"sqlite:///{db_path}", future=True)
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        account = Account(broker="B1", account_label="Taxable", account_type="TAXABLE")
+        session.add(account)
+        session.flush()
+
+        session.add_all(
+            [
+                TradeRaw(
+                    account_id=account.id,
+                    broker="B1",
+                    source_file="f.csv",
+                    file_signature="sig",
+                    row_index=0,
+                    row_hash=None,
+                    raw_payload={"row": "same"},
+                    mapping_name="m1",
+                ),
+                TradeRaw(
+                    account_id=account.id,
+                    broker="B1",
+                    source_file="f.csv",
+                    file_signature="sig",
+                    row_index=1,
+                    row_hash=None,
+                    raw_payload={"row": "same"},
+                    mapping_name="m1",
+                ),
+                TradeNormalized(
+                    account_id=account.id,
+                    broker="B1",
+                    trade_id="T-1",
+                    executed_at=datetime(2025, 1, 2, 10, 0, 0),
+                    instrument_type="STOCK",
+                    symbol="AAPL",
+                    side="BUY",
+                    option_symbol_raw=None,
+                    underlying=None,
+                    expiration=None,
+                    strike=None,
+                    call_put=None,
+                    multiplier=1,
+                    quantity=1.0,
+                    price=10.0,
+                    fees=0.0,
+                    net_amount=-10.0,
+                    currency="USD",
+                    dedupe_key=None,
+                ),
+                TradeNormalized(
+                    account_id=account.id,
+                    broker="B1",
+                    trade_id="T-1",
+                    executed_at=datetime(2025, 1, 2, 10, 0, 0),
+                    instrument_type="STOCK",
+                    symbol="AAPL",
+                    side="BUY",
+                    option_symbol_raw=None,
+                    underlying=None,
+                    expiration=None,
+                    strike=None,
+                    call_put=None,
+                    multiplier=1,
+                    quantity=1.0,
+                    price=10.0,
+                    fees=0.0,
+                    net_amount=-10.0,
+                    currency="USD",
+                    dedupe_key=None,
+                ),
+                CashActivity(
+                    account_id=account.id,
+                    broker="B1",
+                    posted_at=datetime(2025, 1, 5, 12, 0, 0),
+                    activity_type="DEPOSIT",
+                    amount=100.0,
+                    description="ACH deposit",
+                    source="ACH",
+                    is_external=True,
+                    dedupe_key=None,
+                ),
+                CashActivity(
+                    account_id=account.id,
+                    broker="B1",
+                    posted_at=datetime(2025, 1, 5, 12, 0, 0),
+                    activity_type="DEPOSIT",
+                    amount=100.0,
+                    description="ACH deposit",
+                    source="ACH",
+                    is_external=True,
+                    dedupe_key=None,
+                ),
+            ]
+        )
+        session.commit()
+
+    migrate(database_url=f"sqlite:///{db_path}")
+
+    with Session(create_engine(f"sqlite:///{db_path}", future=True)) as session:
+        assert session.scalar(select(func.count()).select_from(TradeRaw)) == 1
+        assert session.scalar(select(func.count()).select_from(TradeNormalized)) == 1
+        assert session.scalar(select(func.count()).select_from(CashActivity)) == 1
+
+        assert session.scalars(select(TradeRaw.row_hash)).one() is not None
+        assert session.scalars(select(TradeNormalized.dedupe_key)).one() is not None
+        assert session.scalars(select(CashActivity.dedupe_key)).one() is not None
