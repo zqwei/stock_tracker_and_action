@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, BinaryIO
+import re
 
 import pandas as pd
 
@@ -143,6 +144,44 @@ def _normalize(text: str) -> str:
     return " ".join(str(text).strip().lower().replace("_", " ").split())
 
 
+_TOKEN_ALIASES = {
+    "avg": "average",
+    "qty": "quantity",
+    "amt": "amount",
+    "dt": "date",
+}
+
+
+def _tokenize(text: str) -> set[str]:
+    raw_tokens = [token for token in re.split(r"[^a-z0-9]+", str(text).strip().lower()) if token]
+    return {_TOKEN_ALIASES.get(token, token) for token in raw_tokens}
+
+
+def _resolve_by_token_subset(
+    query_text: str,
+    column_token_sets: dict[str, set[str]],
+) -> tuple[str | None, bool]:
+    query_tokens = _tokenize(query_text)
+    if not query_tokens:
+        return None, False
+
+    candidates: list[tuple[int, int, str]] = []
+    for column, tokens in column_token_sets.items():
+        if not query_tokens.issubset(tokens):
+            continue
+        candidates.append((len(tokens - query_tokens), len(tokens), column))
+
+    if not candidates:
+        return None, False
+
+    candidates.sort()
+    best_extra, best_len, best_column = candidates[0]
+    ties = [entry for entry in candidates if entry[0] == best_extra and entry[1] == best_len]
+    if len(ties) > 1:
+        return None, True
+    return best_column, False
+
+
 def _canonical_field_name(field: str) -> str | None:
     normalized = _normalize(field)
     resolved = _CANONICAL_FIELD_ALIASES.get(normalized, normalized)
@@ -178,9 +217,11 @@ def _resolve_source_column(source: str, columns: list[str] | None) -> tuple[str 
     exact_columns: dict[str, str] = {}
     normalized_columns: dict[str, str] = {}
     ambiguous_normalized: set[str] = set()
+    column_token_sets: dict[str, set[str]] = {}
     for column in columns:
         col_text = str(column)
         exact_columns[col_text] = col_text
+        column_token_sets[col_text] = _tokenize(col_text)
         normalized_col = _normalize(col_text)
         previous = normalized_columns.get(normalized_col)
         if previous is None:
@@ -196,12 +237,24 @@ def _resolve_source_column(source: str, columns: list[str] | None) -> tuple[str 
         return None, f"source column '{source_text}' is ambiguous in the CSV"
     resolved = normalized_columns.get(normalized_source)
     if resolved is None:
-        return None, f"source column '{source_text}' is not present in the CSV"
+        token_source, token_ambiguous = _resolve_by_token_subset(
+            source_text,
+            column_token_sets,
+        )
+        if token_ambiguous:
+            return (
+                None,
+                f"source column '{source_text}' matches multiple CSV columns by tokens",
+            )
+        if token_source is None:
+            return None, f"source column '{source_text}' is not present in the CSV"
+        resolved = token_source
     return resolved, None
 
 
 def infer_broker_export_column_map(columns: list[str]) -> dict[str, str]:
     normalized_to_original = {_normalize(column): column for column in columns}
+    column_token_sets = {str(column): _tokenize(column) for column in columns}
     inferred: dict[str, str] = {}
 
     for field in BROKER_EXPORT_CANONICAL_FIELDS:
@@ -209,6 +262,14 @@ def infer_broker_export_column_map(columns: list[str]) -> dict[str, str]:
         candidates = [field, *aliases]
         for candidate in candidates:
             source_column = normalized_to_original.get(_normalize(candidate))
+            if not source_column:
+                token_source, token_ambiguous = _resolve_by_token_subset(
+                    candidate,
+                    column_token_sets,
+                )
+                if token_ambiguous:
+                    continue
+                source_column = token_source
             if source_column:
                 inferred[field] = source_column
                 break

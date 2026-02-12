@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
+import re
 
 import pandas as pd
 
@@ -27,6 +28,37 @@ from portfolio_assistant.ingest.validators import (
     parse_float,
     parse_option_symbol,
 )
+
+_OPTION_INSTRUMENT_HINTS = {
+    "OPTION",
+    "OPTIONS",
+    "OPT",
+    "OPTION CONTRACT",
+    "OPTIONS CONTRACT",
+    "EQUITY OPTION",
+    "CALL",
+    "PUT",
+    "DERIVATIVE",
+}
+
+_STOCK_INSTRUMENT_HINTS = {
+    "STOCK",
+    "EQUITY",
+    "COMMON STOCK",
+    "SHARE",
+    "SHARES",
+    "ETF",
+}
+
+_UNKNOWN_INSTRUMENT_HINTS = {"", "N/A", "NA", "--", "UNKNOWN", "UNSPECIFIED", "OTHER"}
+
+
+def _normalize_instrument_hint(value: object) -> str:
+    text = str(value or "").strip().upper()
+    if not text:
+        return ""
+    tokens = [token for token in re.split(r"[^A-Z0-9]+", text) if token]
+    return " ".join(tokens)
 
 
 @dataclass(frozen=True)
@@ -143,8 +175,18 @@ def normalize_trade_records(
         option_symbol_candidate = option_symbol_raw or symbol_value
         parsed_option = parse_option_symbol(option_symbol_candidate)
         instrument_value = row_data.get("instrument_type")
-        if not str(instrument_value or "").strip() and default_instrument:
+        instrument_hint = _normalize_instrument_hint(instrument_value)
+
+        if instrument_hint in _OPTION_INSTRUMENT_HINTS:
+            instrument_value = "OPTION"
+        elif instrument_hint in _STOCK_INSTRUMENT_HINTS:
+            instrument_value = "STOCK"
+        elif default_instrument and (
+            instrument_hint in _UNKNOWN_INSTRUMENT_HINTS
+            or instrument_hint not in (_OPTION_INSTRUMENT_HINTS | _STOCK_INSTRUMENT_HINTS)
+        ):
             instrument_value = default_instrument
+
         instrument_type = normalize_instrument_type(
             instrument_value,
             option_symbol_raw=option_symbol_candidate if parsed_option else None,

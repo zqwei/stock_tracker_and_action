@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -70,6 +71,7 @@ from portfolio_assistant.ingest.csv_mapping import (
     get_saved_trade_mapping,
     missing_required_fields,
     save_trade_mapping,
+    suggest_trade_column_candidates,
     trade_mapping_hints,
 )
 from portfolio_assistant.ingest.validators import parse_datetime
@@ -158,6 +160,63 @@ def _mapping_display_name(field: str) -> str:
 def _mapping_field_label(field: str, *, required: bool) -> str:
     suffix = " *" if required else ""
     return f"{_mapping_display_name(field)}{suffix}"
+
+
+def _is_likely_instrument_type_column_name(column_name: str) -> bool:
+    normalized = "".join(ch if ch.isalnum() else " " for ch in column_name.lower())
+    tokens = {token for token in normalized.split() if token}
+    return bool(tokens.intersection({"type", "instrument", "asset", "class"}))
+
+
+def _normalize_instrument_hint_text(value: object) -> str:
+    text = str(value or "").strip().upper()
+    if not text:
+        return ""
+    return " ".join(token for token in re.split(r"[^A-Z0-9]+", text) if token)
+
+
+def _mapped_instrument_values_are_clear(
+    df: pd.DataFrame,
+    column_name: str,
+    *,
+    sample_size: int = 50,
+) -> bool:
+    if column_name not in df.columns:
+        return False
+    series = df[column_name]
+    if series.empty:
+        return False
+
+    recognized = {
+        "STOCK",
+        "EQUITY",
+        "SHARE",
+        "SHARES",
+        "ETF",
+        "OPTION",
+        "OPTIONS",
+        "OPT",
+        "OPTION CONTRACT",
+        "OPTIONS CONTRACT",
+        "EQUITY OPTION",
+        "CALL",
+        "PUT",
+    }
+    unknown_markers = {"", "N/A", "NA", "--", "UNKNOWN", "UNSPECIFIED"}
+
+    checked = 0
+    clear = 0
+    for raw_value in series.head(sample_size).tolist():
+        normalized = _normalize_instrument_hint_text(raw_value)
+        if normalized in unknown_markers:
+            continue
+        checked += 1
+        if normalized in recognized:
+            clear += 1
+
+    if checked == 0:
+        return False
+    return (clear / checked) >= 0.8
 
 
 def _account_label(account: Account) -> str:
@@ -570,13 +629,60 @@ def _render_import_trades(
         key_prefix=mapping_key,
     )
 
+    if missing:
+        suggestion_rows: list[dict[str, str]] = []
+        for field in missing:
+            suggestions = suggest_trade_column_candidates(
+                preview.columns,
+                field,
+                broker=broker,
+                limit=3,
+            )
+            if suggestions:
+                suggestion_rows.append(
+                    {
+                        "Missing field": _mapping_display_name(field),
+                        "Suggested columns": ", ".join(suggestions),
+                    }
+                )
+        if suggestion_rows:
+            st.info("Suggested columns for missing required fields")
+            st.dataframe(
+                pd.DataFrame(suggestion_rows),
+                use_container_width=True,
+                hide_index=True,
+            )
+
     default_instrument_type: str | None = None
-    if "instrument_type" not in current_mapping:
+    instrument_type_column = current_mapping.get("instrument_type")
+    instrument_values_clear = (
+        _mapped_instrument_values_are_clear(df, instrument_type_column)
+        if instrument_type_column
+        else False
+    )
+    show_default_type_picker = (
+        instrument_type_column is None
+        or not _is_likely_instrument_type_column_name(instrument_type_column)
+        or not instrument_values_clear
+    )
+    if show_default_type_picker:
+        if instrument_type_column is None:
+            st.caption("No Instrument Type column mapped; choose a per-file default when needed.")
+        elif not _is_likely_instrument_type_column_name(instrument_type_column):
+            st.caption(
+                "Instrument Type is mapped to a non-type-like column "
+                f"(`{instrument_type_column}`). You can set a safe default below."
+            )
+        else:
+            st.caption(
+                "Mapped Instrument Type values appear unclear in this file. "
+                "Choose a safe default or keep Auto detect."
+            )
         default_choice = st.selectbox(
-            "Default instrument type (when file has no type column)",
+            "Default instrument type (when type values are missing or unclear)",
             options=["Auto detect", "Stock", "Option"],
             help=(
-                "Use this when your CSV is stock-only or option-only and has no Instrument Type column. "
+                "Use this when your CSV is stock-only or option-only and has no clean Instrument Type values. "
                 "Auto detect infers from OCC option symbols and option-style sides (BTO/STO/BTC/STC)."
             ),
             key=f"{mapping_key}_default_instrument_type",
