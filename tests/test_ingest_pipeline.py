@@ -14,7 +14,11 @@ from portfolio_assistant.assistant.tools_db import (
     insert_trade_import,
 )
 from portfolio_assistant.db.models import Account, Base, CashActivity, TradeNormalized, TradeRaw
-from portfolio_assistant.ingest.csv_import import normalize_cash_records, normalize_trade_records
+from portfolio_assistant.ingest.csv_import import (
+    normalize_cash_records,
+    normalize_trade_records,
+    parse_import_issue,
+)
 from portfolio_assistant.ingest.csv_mapping import (
     get_saved_trade_mapping,
     infer_trade_column_map,
@@ -120,6 +124,8 @@ def test_normalize_trade_records_rejects_duplicate_source_mapping():
 
     assert rows == []
     assert any("multiple fields" in issue for issue in issues), issues
+    severities = [parse_import_issue(issue)[0] for issue in issues]
+    assert severities and all(severity == "ERROR" for severity in severities)
 
 
 def test_infer_trade_column_map_webull_prefers_filled_time_avg_price_and_filled_qty():
@@ -276,6 +282,76 @@ def test_normalize_trade_records_accepts_token_subset_mapping_source_names():
     assert rows[0]["price"] == 12.5
 
 
+def test_normalize_trade_records_marks_non_filled_skip_as_info():
+    df = pd.DataFrame(
+        [
+            {
+                "Trade Date": "2025-01-05",
+                "Buy/Sell": "BUY",
+                "Quantity": "0",
+                "Unit Price": "25.50",
+                "Symbol": "AAPL",
+            }
+        ]
+    )
+    mapping = {
+        "executed_at": "Trade Date",
+        "side": "Buy/Sell",
+        "quantity": "Quantity",
+        "price": "Unit Price",
+        "symbol": "Symbol",
+    }
+
+    rows, issues = normalize_trade_records(
+        df=df,
+        mapping=mapping,
+        account_id="acc-1",
+        broker="generic",
+        default_instrument_type="STOCK",
+    )
+
+    assert rows == []
+    assert len(issues) == 1
+    severity, message = parse_import_issue(issues[0])
+    assert severity == "INFO"
+    assert "skipped non-filled row" in message
+
+
+def test_normalize_trade_records_marks_malformed_row_as_warning():
+    df = pd.DataFrame(
+        [
+            {
+                "Trade Date": "",
+                "Buy/Sell": "BUY",
+                "Quantity": "1",
+                "Unit Price": "25.50",
+                "Symbol": "AAPL",
+            }
+        ]
+    )
+    mapping = {
+        "executed_at": "Trade Date",
+        "side": "Buy/Sell",
+        "quantity": "Quantity",
+        "price": "Unit Price",
+        "symbol": "Symbol",
+    }
+
+    rows, issues = normalize_trade_records(
+        df=df,
+        mapping=mapping,
+        account_id="acc-1",
+        broker="generic",
+        default_instrument_type="STOCK",
+    )
+
+    assert rows == []
+    assert len(issues) == 1
+    severity, message = parse_import_issue(issues[0])
+    assert severity == "WARNING"
+    assert "invalid executed_at" in message
+
+
 def test_validate_mapping_reports_ambiguous_token_subset_source_name():
     columns = ["Trade Date Local", "Trade Date UTC", "Side", "Qty", "Price"]
     mapping = {
@@ -310,6 +386,12 @@ def test_suggest_trade_column_candidates_returns_best_matches_for_missing_requir
     assert price_candidates[0] == "Average Fill Price"
 
 
+def test_parse_import_issue_defaults_to_warning_for_legacy_text():
+    severity, message = parse_import_issue("Row 1: invalid executed_at")
+    assert severity == "WARNING"
+    assert message == "Row 1: invalid executed_at"
+
+
 def test_normalize_cash_records_requires_positive_amount():
     df = pd.DataFrame(
         [
@@ -335,6 +417,8 @@ def test_normalize_cash_records_requires_positive_amount():
 
     assert rows == []
     assert any("amount must be > 0" in issue for issue in issues), issues
+    severities = [parse_import_issue(issue)[0] for issue in issues]
+    assert severities and all(severity == "WARNING" for severity in severities)
 
 
 def test_save_trade_mapping_validates_and_roundtrips(tmp_path, monkeypatch):
