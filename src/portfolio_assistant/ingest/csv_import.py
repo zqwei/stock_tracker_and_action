@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, Literal
 import re
 
 import pandas as pd
@@ -53,12 +53,39 @@ _STOCK_INSTRUMENT_HINTS = {
 _UNKNOWN_INSTRUMENT_HINTS = {"", "N/A", "NA", "--", "UNKNOWN", "UNSPECIFIED", "OTHER"}
 
 
+ImportIssueSeverity = Literal["INFO", "WARNING", "ERROR"]
+_IMPORT_ISSUE_SEVERITIES: tuple[ImportIssueSeverity, ...] = ("INFO", "WARNING", "ERROR")
+
+
+# Import issue contract for UI/consumers:
+# - Each issue string can be tagged with a leading severity token:
+#   "[INFO] ...", "[WARNING] ...", "[ERROR] ..."
+# - Legacy consumers can keep treating issues as plain strings.
+# - Consumers that need severity should call `parse_import_issue`.
 def _normalize_instrument_hint(value: object) -> str:
     text = str(value or "").strip().upper()
     if not text:
         return ""
     tokens = [token for token in re.split(r"[^A-Z0-9]+", text) if token]
     return " ".join(tokens)
+
+
+def make_import_issue(message: str, *, severity: ImportIssueSeverity = "WARNING") -> str:
+    severity_text = severity.upper()
+    if severity_text not in _IMPORT_ISSUE_SEVERITIES:
+        severity_text = "WARNING"
+    return f"[{severity_text}] {message}"
+
+
+def parse_import_issue(issue: str) -> tuple[ImportIssueSeverity, str]:
+    text = str(issue or "").strip()
+    for severity in _IMPORT_ISSUE_SEVERITIES:
+        prefix = f"[{severity}]"
+        if text.upper().startswith(prefix):
+            detail = text[len(prefix) :].lstrip(" :")
+            return severity, detail or text
+    # Backward-compatible default for old untagged issue text.
+    return "WARNING", text
 
 
 @dataclass(frozen=True)
@@ -160,7 +187,10 @@ def normalize_trade_records(
         required_fields=TRADE_REQUIRED_FIELDS,
     )
     if mapping_errors:
-        return [], [f"Mapping error: {error}" for error in mapping_errors]
+        return [], [
+            make_import_issue(f"Mapping error: {error}", severity="ERROR")
+            for error in mapping_errors
+        ]
 
     renamed = apply_mapping(
         df,
@@ -199,7 +229,12 @@ def normalize_trade_records(
         quantity = parse_float(row_data.get("quantity"), default=0.0) or 0.0
         quantity = abs(quantity)
         if quantity <= 0:
-            issues.append(f"Row {row_number}: skipped non-filled row (quantity <= 0)")
+            issues.append(
+                make_import_issue(
+                    f"Row {row_number}: skipped non-filled row (quantity <= 0)",
+                    severity="INFO",
+                )
+            )
             continue
 
         executed_at = parse_datetime(row_data.get("executed_at"))
@@ -250,25 +285,52 @@ def normalize_trade_records(
             side = "SELL"
 
         if executed_at is None:
-            issues.append(f"Row {row_number}: invalid executed_at")
+            issues.append(
+                make_import_issue(f"Row {row_number}: invalid executed_at", severity="WARNING")
+            )
             continue
         if not side:
-            issues.append(f"Row {row_number}: missing side")
+            issues.append(make_import_issue(f"Row {row_number}: missing side", severity="WARNING"))
             continue
         if instrument_type == "STOCK" and side not in {"BUY", "SELL"}:
-            issues.append(f"Row {row_number}: invalid stock side '{side}'")
+            issues.append(
+                make_import_issue(
+                    f"Row {row_number}: invalid stock side '{side}'",
+                    severity="WARNING",
+                )
+            )
             continue
         if instrument_type == "OPTION" and side not in {"BUY", "SELL", "BTO", "STO", "BTC", "STC"}:
-            issues.append(f"Row {row_number}: invalid option side '{side}'")
+            issues.append(
+                make_import_issue(
+                    f"Row {row_number}: invalid option side '{side}'",
+                    severity="WARNING",
+                )
+            )
             continue
         if price < 0:
-            issues.append(f"Row {row_number}: price cannot be negative")
+            issues.append(
+                make_import_issue(
+                    f"Row {row_number}: price cannot be negative",
+                    severity="WARNING",
+                )
+            )
             continue
         if instrument_type == "OPTION" and multiplier <= 0:
-            issues.append(f"Row {row_number}: option multiplier must be > 0")
+            issues.append(
+                make_import_issue(
+                    f"Row {row_number}: option multiplier must be > 0",
+                    severity="WARNING",
+                )
+            )
             continue
         if not symbol and not underlying:
-            issues.append(f"Row {row_number}: symbol/underlying missing")
+            issues.append(
+                make_import_issue(
+                    f"Row {row_number}: symbol/underlying missing",
+                    severity="WARNING",
+                )
+            )
             continue
 
         normalized_rows.append(
@@ -310,7 +372,10 @@ def normalize_cash_records(
         required_fields=CASH_REQUIRED_FIELDS,
     )
     if mapping_errors:
-        return [], [f"Mapping error: {error}" for error in mapping_errors]
+        return [], [
+            make_import_issue(f"Mapping error: {error}", severity="ERROR")
+            for error in mapping_errors
+        ]
 
     renamed = apply_mapping(
         df,
@@ -322,7 +387,12 @@ def normalize_cash_records(
         posted_at = parse_datetime(row_data.get("posted_at"))
         raw_amount = parse_float(row_data.get("amount"))
         if raw_amount is None:
-            issues.append(f"Cash row {row_number}: invalid amount")
+            issues.append(
+                make_import_issue(
+                    f"Cash row {row_number}: invalid amount",
+                    severity="WARNING",
+                )
+            )
             continue
 
         amount = abs(raw_amount)
@@ -332,10 +402,20 @@ def normalize_cash_records(
         is_external = is_external_cash_guess(description=description, source=source)
 
         if posted_at is None:
-            issues.append(f"Cash row {row_number}: invalid posted_at")
+            issues.append(
+                make_import_issue(
+                    f"Cash row {row_number}: invalid posted_at",
+                    severity="WARNING",
+                )
+            )
             continue
         if amount <= 0:
-            issues.append(f"Cash row {row_number}: amount must be > 0")
+            issues.append(
+                make_import_issue(
+                    f"Cash row {row_number}: amount must be > 0",
+                    severity="WARNING",
+                )
+            )
             continue
 
         rows.append(
