@@ -4,7 +4,7 @@ from collections.abc import Iterable
 from contextlib import contextmanager
 from time import perf_counter
 
-from sqlalchemy import case, delete, func, insert, select, text
+from sqlalchemy import case, delete, func, insert, or_, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -15,6 +15,7 @@ from portfolio_assistant.db.models import (
     PnlRealized,
     PositionOpen,
     PriceCache,
+    ReconciliationArtifact,
     ReconciliationRun,
     TradeNormalized,
     TradeRaw,
@@ -59,45 +60,144 @@ def list_accounts(session: Session) -> list[Account]:
     )
 
 
-def delete_account_if_empty(session: Session, account_id: str) -> tuple[bool, str]:
+def _account_dependency_rules(account_id: str) -> list[tuple[str, object]]:
+    trade_ids = select(TradeNormalized.id).where(TradeNormalized.account_id == account_id)
+    pnl_ids = select(PnlRealized.id).where(PnlRealized.account_id == account_id)
+    reconciliation_run_ids = select(ReconciliationRun.id).where(
+        ReconciliationRun.account_id == account_id
+    )
+
+    wash_sale_filter = or_(
+        WashSaleAdjustment.replacement_account_id == account_id,
+        WashSaleAdjustment.loss_trade_row_id.in_(trade_ids),
+        WashSaleAdjustment.replacement_trade_row_id.in_(trade_ids),
+        WashSaleAdjustment.loss_sale_row_id.in_(pnl_ids),
+        WashSaleAdjustment.reconciliation_run_id.in_(reconciliation_run_ids),
+    )
+
+    return [
+        ("trade imports", TradeRaw.account_id == account_id),
+        ("normalized trades", TradeNormalized.account_id == account_id),
+        ("cash rows", CashActivity.account_id == account_id),
+        ("realized rows", PnlRealized.account_id == account_id),
+        ("open positions", PositionOpen.account_id == account_id),
+        ("reconciliation artifacts", ReconciliationArtifact.reconciliation_run_id.in_(reconciliation_run_ids)),
+        ("reconciliation runs", ReconciliationRun.account_id == account_id),
+        ("wash-sale matches", wash_sale_filter),
+    ]
+
+
+def _account_dependency_counts(session: Session, account_id: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for label, predicate in _account_dependency_rules(account_id):
+        model = {
+            "trade imports": TradeRaw,
+            "normalized trades": TradeNormalized,
+            "cash rows": CashActivity,
+            "realized rows": PnlRealized,
+            "open positions": PositionOpen,
+            "reconciliation artifacts": ReconciliationArtifact,
+            "reconciliation runs": ReconciliationRun,
+            "wash-sale matches": WashSaleAdjustment,
+        }[label]
+        stmt = select(func.count()).select_from(model).where(predicate)
+        counts[label] = int(session.scalar(stmt) or 0)
+    return counts
+
+
+def _format_dependency_counts(counts: dict[str, int]) -> str:
+    ordered_labels = [
+        "trade imports",
+        "normalized trades",
+        "cash rows",
+        "realized rows",
+        "open positions",
+        "reconciliation artifacts",
+        "reconciliation runs",
+        "wash-sale matches",
+    ]
+    return ", ".join(f"{label}={counts.get(label, 0)}" for label in ordered_labels)
+
+
+def _delete_account_dependencies(session: Session, account_id: str) -> None:
+    trade_ids = select(TradeNormalized.id).where(TradeNormalized.account_id == account_id)
+    pnl_ids = select(PnlRealized.id).where(PnlRealized.account_id == account_id)
+    reconciliation_run_ids = select(ReconciliationRun.id).where(
+        ReconciliationRun.account_id == account_id
+    )
+
+    session.execute(
+        delete(WashSaleAdjustment).where(
+            or_(
+                WashSaleAdjustment.replacement_account_id == account_id,
+                WashSaleAdjustment.loss_trade_row_id.in_(trade_ids),
+                WashSaleAdjustment.replacement_trade_row_id.in_(trade_ids),
+                WashSaleAdjustment.loss_sale_row_id.in_(pnl_ids),
+                WashSaleAdjustment.reconciliation_run_id.in_(reconciliation_run_ids),
+            )
+        )
+    )
+    session.execute(
+        delete(ReconciliationArtifact).where(
+            ReconciliationArtifact.reconciliation_run_id.in_(reconciliation_run_ids)
+        )
+    )
+    session.execute(delete(ReconciliationRun).where(ReconciliationRun.account_id == account_id))
+    session.execute(delete(PositionOpen).where(PositionOpen.account_id == account_id))
+    session.execute(delete(PnlRealized).where(PnlRealized.account_id == account_id))
+    session.execute(delete(CashActivity).where(CashActivity.account_id == account_id))
+    session.execute(delete(TradeNormalized).where(TradeNormalized.account_id == account_id))
+    session.execute(delete(TradeRaw).where(TradeRaw.account_id == account_id))
+
+
+def delete_account_if_empty(
+    session: Session,
+    account_id: str,
+    *,
+    force: bool = False,
+) -> tuple[bool, str]:
     account = session.get(Account, account_id)
     if account is None:
         return False, "Account not found."
 
-    checks = {
-        "trade imports": select(func.count()).select_from(TradeRaw).where(TradeRaw.account_id == account_id),
-        "normalized trades": select(func.count())
-        .select_from(TradeNormalized)
-        .where(TradeNormalized.account_id == account_id),
-        "cash rows": select(func.count())
-        .select_from(CashActivity)
-        .where(CashActivity.account_id == account_id),
-        "realized rows": select(func.count())
-        .select_from(PnlRealized)
-        .where(PnlRealized.account_id == account_id),
-        "open positions": select(func.count())
-        .select_from(PositionOpen)
-        .where(PositionOpen.account_id == account_id),
-        "reconciliation runs": select(func.count())
-        .select_from(ReconciliationRun)
-        .where(ReconciliationRun.account_id == account_id),
-        "wash-sale matches": select(func.count())
-        .select_from(WashSaleAdjustment)
-        .where(WashSaleAdjustment.replacement_account_id == account_id),
-    }
-    usage = {label: int(session.scalar(stmt) or 0) for label, stmt in checks.items()}
-    blocking = {label: count for label, count in usage.items() if count > 0}
+    usage_before = _account_dependency_counts(session, account_id)
+    blocking = {label: count for label, count in usage_before.items() if count > 0}
+    usage_summary = _format_dependency_counts(usage_before)
     if blocking:
-        summary = ", ".join(f"{label}={count}" for label, count in blocking.items())
-        return (
-            False,
-            "Cannot remove account because data exists. "
-            f"Delete dependent rows first ({summary}).",
-        )
+        if force:
+            _delete_account_dependencies(session, account_id)
+            session.flush()
+        else:
+            return (
+                False,
+                "Cannot remove account because data exists. "
+                "Delete dependent rows first or retry with force=True "
+                f"({usage_summary}).",
+            )
+
+    if force and blocking:
+        # Recompute after forced cleanup and fail-safe if anything still remains.
+        usage_after = _account_dependency_counts(session, account_id)
+        remaining = {label: count for label, count in usage_after.items() if count > 0}
+        if remaining:
+            summary = ", ".join(f"{label}={count}" for label, count in remaining.items())
+            return (
+                False,
+                "Cannot force-remove account because dependent rows remain "
+                f"after cleanup ({summary}).",
+            )
 
     session.delete(account)
     session.flush()
-    return True, f"Removed account '{account.broker} | {account.account_label}'."
+    if force:
+        return True, (
+            f"Force removed account '{account.broker} | {account.account_label}'. "
+            f"Deleted dependencies: {usage_summary}."
+        )
+    return True, (
+        f"Removed account '{account.broker} | {account.account_label}'. "
+        f"Dependencies at delete time: {usage_summary}."
+    )
 
 
 def _chunked(rows: list[dict], batch_size: int) -> Iterable[list[dict]]:
