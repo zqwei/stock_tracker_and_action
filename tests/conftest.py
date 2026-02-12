@@ -2,12 +2,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import os
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from portfolio_assistant.db.models import Account, Base, CashActivity, TradeNormalized
+
+# Old Streamlit protobuf stubs can fail at import-time with newer protobuf.
+# Force the pure-Python protobuf runtime for test collection safety.
+os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
 
 
 @dataclass(frozen=True)
