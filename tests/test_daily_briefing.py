@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from types import SimpleNamespace
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -86,6 +87,8 @@ def test_generate_daily_briefing_writes_artifact_and_guardrails(tmp_path):
     assert payload["account_scope"] == account_id
     assert payload["summary_provider_requested"] == "none"
     assert payload["summary_provider"] == "none"
+    assert payload["summary_status"] == "local_deterministic"
+    assert payload["summary_metrics"]["holdings_symbol_count"] == 1
     assert "Local deterministic briefing:" in payload["summary_text"]
     assert payload["holdings_context"]["symbols"] == ["MSFT"]
     assert payload["holdings_updates"]["source"] == "rss"
@@ -257,7 +260,55 @@ def test_generate_daily_briefing_local_mode_does_not_call_openai(monkeypatch, tm
     assert result.gpt_summary is None
     assert payload["summary_provider_requested"] == "none"
     assert payload["summary_provider"] == "none"
+    assert payload["summary_status"] == "local_deterministic"
     assert "Local deterministic briefing:" in payload["summary_text"]
+    assert "gpt_error" not in payload
+
+
+def test_generate_daily_briefing_openai_provider_but_gpt_summary_disabled_does_not_call_openai(
+    monkeypatch, tmp_path
+):
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        account = _seed_account(session)
+        account_id = account.id
+        session.add(
+            PositionOpen(
+                account_id=account_id,
+                instrument_type="STOCK",
+                symbol="AAPL",
+                option_symbol_raw=None,
+                quantity=1.0,
+                avg_cost=100.0,
+                last_price=99.0,
+                market_value=99.0,
+                unrealized_pnl=-1.0,
+            )
+        )
+        session.commit()
+
+    def _raise_if_called() -> None:
+        raise AssertionError("OpenAI client should not be built when include_gpt_summary=False.")
+
+    monkeypatch.setattr(daily_briefing_module, "_build_openai_client", _raise_if_called)
+
+    result = generate_daily_briefing(
+        engine,
+        model="gpt-5-mini",
+        account_id=account_id,
+        include_gpt_summary=False,
+        summarizer_provider=SummarizerProvider.OPENAI,
+        output_dir=tmp_path,
+        as_of=datetime(2026, 2, 10, 9, 15, 0),
+    )
+
+    payload = result.payload
+    assert result.gpt_summary is None
+    assert payload["summary_provider_requested"] == "openai"
+    assert payload["summary_provider"] == "none"
+    assert payload["summary_status"] == "local_deterministic"
     assert "gpt_error" not in payload
 
 
@@ -306,6 +357,55 @@ def test_generate_daily_briefing_openai_mode_falls_back_to_local_on_client_error
     assert result.gpt_summary is None
     assert payload["summary_provider_requested"] == "openai"
     assert payload["summary_provider"] == "none"
+    assert payload["summary_status"] == "openai_fallback"
     assert payload["summary_fallback"] == "local_deterministic"
     assert "Local deterministic briefing:" in payload["summary_text"]
     assert "openai package is not installed" in payload["gpt_error"]
+
+
+def test_generate_daily_briefing_openai_mode_success_uses_ai_summary(tmp_path):
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        account = _seed_account(session)
+        account_id = account.id
+        session.add(
+            PositionOpen(
+                account_id=account_id,
+                instrument_type="STOCK",
+                symbol="MSFT",
+                option_symbol_raw=None,
+                quantity=2.0,
+                avg_cost=200.0,
+                last_price=205.0,
+                market_value=410.0,
+                unrealized_pnl=10.0,
+            )
+        )
+        session.commit()
+
+    class _FakeResponses:
+        @staticmethod
+        def create(**_kwargs):
+            return SimpleNamespace(output_text="AI summary text", output=[])
+
+    fake_client = SimpleNamespace(responses=_FakeResponses())
+
+    result = generate_daily_briefing(
+        engine,
+        model="gpt-5-mini",
+        account_id=account_id,
+        include_gpt_summary=True,
+        summarizer_provider=SummarizerProvider.OPENAI,
+        client=fake_client,
+        output_dir=tmp_path,
+        as_of=datetime(2026, 2, 10, 10, 0, 0),
+    )
+
+    payload = result.payload
+    assert result.gpt_summary == "AI summary text"
+    assert payload["summary_provider_requested"] == "openai"
+    assert payload["summary_provider"] == "openai"
+    assert payload["summary_status"] == "openai_success"
+    assert payload["summary_text"] == "AI summary text"
