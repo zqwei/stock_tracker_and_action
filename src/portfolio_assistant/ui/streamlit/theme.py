@@ -161,6 +161,12 @@ __ROOT_VARS__
   color: var(--pa-text_muted);
 }
 
+[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p {
+  color: var(--pa-text_strong) !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.01em;
+}
+
 [data-testid="stSidebarNav"] a {
   color: var(--pa-text) !important;
   border-radius: 12px !important;
@@ -224,7 +230,13 @@ code, pre, kbd {
   padding: 0.56rem 0.72rem;
   border: 1px solid color-mix(in oklab, var(--pa-border) 76%, transparent);
   background: color-mix(in oklab, var(--pa-surface) 90%, var(--pa-bg_0));
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--pa-border) 35%, transparent);
   transition: border-color 140ms ease, box-shadow 140ms ease, background 140ms ease;
+}
+
+[data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"]:hover > div:last-child {
+  border-color: color-mix(in oklab, var(--pa-accent) 62%, var(--pa-border)) !important;
+  background: color-mix(in oklab, var(--pa-surface) 94%, var(--pa-bg_1)) !important;
 }
 
 [data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"] p {
@@ -240,7 +252,9 @@ code, pre, kbd {
     color-mix(in oklab, var(--pa-accent) 34%, transparent),
     color-mix(in oklab, var(--pa-accent_2) 26%, transparent)
   );
-  box-shadow: 0 10px 22px color-mix(in oklab, var(--pa-accent) 35%, transparent);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in oklab, var(--pa-border_strong) 75%, transparent),
+    0 10px 22px color-mix(in oklab, var(--pa-accent) 35%, transparent);
 }
 
 [data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
@@ -379,12 +393,16 @@ textarea:focus {
 
 [data-baseweb="tab"] {
   color: var(--pa-text_muted) !important;
-  border-bottom: 2px solid transparent !important;
+  border: 1px solid color-mix(in oklab, var(--pa-border) 68%, transparent) !important;
+  border-radius: 999px !important;
+  padding: 0.34rem 0.84rem !important;
+  background: color-mix(in oklab, var(--pa-surface) 82%, transparent) !important;
 }
 
 [data-baseweb="tab"][aria-selected="true"] {
   color: var(--pa-text_strong) !important;
-  border-bottom: 2px solid var(--pa-accent) !important;
+  border-color: var(--pa-accent) !important;
+  background: color-mix(in oklab, var(--pa-accent) 16%, var(--pa-surface)) !important;
 }
 
 button[aria-label^="Help for"] svg {
@@ -418,6 +436,24 @@ BRIGHT_THEME_CSS = """
 [data-testid="stSidebar"] [data-testid="stSidebarNav"] a span {
   color: #0d3659 !important;
   font-weight: 600 !important;
+}
+
+[data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"] > div:last-child {
+  background: #f6fbff !important;
+  border-color: #9ebadc !important;
+}
+
+[data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"]:hover > div:last-child {
+  border-color: #2f75bf !important;
+  background: #ffffff !important;
+}
+
+[data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"] p {
+  color: #154067 !important;
+}
+
+[data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
+  color: #092f52 !important;
 }
 
 [data-testid="stSidebar"] [data-testid="stSidebarNav"] a:hover {

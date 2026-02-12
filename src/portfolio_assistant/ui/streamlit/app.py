@@ -96,6 +96,7 @@ CORE_NAV_ITEMS = [
 ]
 
 TRADE_MAPPING_HIDDEN_FIELDS = {"currency"}
+DELETE_ACCOUNT_CONFIRMATION_PHRASE = "DELETE ACCOUNT"
 
 FIELD_DISPLAY_NAMES = {
     "trade_id": "Trade ID",
@@ -253,11 +254,16 @@ def _render_sidebar(accounts: list[Account], nav_items: list[str]) -> tuple[str,
         st.title("Portfolio Assistant")
         render_theme_selector()
         st.caption("One workflow for imports, analytics, and risk checks.")
-        st.markdown("**Workflow**")
-        nav = st.radio("Navigate", nav_items, key="nav_item", label_visibility="collapsed")
+        st.markdown("**Workflow Navigation**")
+        nav = st.radio(
+            "Workflow navigation",
+            nav_items,
+            key="nav_item",
+            label_visibility="collapsed",
+        )
 
         account_filter_id = st.selectbox(
-            "Global account filter",
+            "Global account scope",
             options=account_options,
             format_func=lambda account_id: (
                 "All accounts (consolidated)"
@@ -266,7 +272,7 @@ def _render_sidebar(accounts: list[Account], nav_items: list[str]) -> tuple[str,
             ),
             key=filter_state_key,
         )
-        st.caption("This scope is shared across report pages.")
+        st.caption("This scope is shared across all workflow pages.")
 
     return nav, account_filter_id
 
@@ -446,21 +452,62 @@ def _render_row_issues(issues: list[str], label: str) -> None:
     if not issues:
         return
 
-    st.warning(f"{len(issues)} {label}. Invalid rows will be skipped.")
+    def _severity(issue_text: str) -> str:
+        normalized = issue_text.lower()
+        if "mapping error" in normalized or "import failed" in normalized:
+            return "error"
+        if "skipped non-filled row" in normalized:
+            return "info"
+        if any(
+            token in normalized
+            for token in ("invalid", "missing", "cannot", "must be", "failed")
+        ):
+            return "warning"
+        return "warning"
+
     issue_df = pd.DataFrame({"issue": issues})
+    issue_df["severity"] = issue_df["issue"].map(_severity)
     issue_df["category"] = issue_df["issue"].map(
         lambda text: text.split(":", 1)[1].strip() if ":" in text else text
     )
+    severity_counts = issue_df["severity"].value_counts(dropna=False).to_dict()
+    error_count = int(severity_counts.get("error", 0))
+    warning_count = int(severity_counts.get("warning", 0))
+    info_count = int(severity_counts.get("info", 0))
+
+    if error_count > 0:
+        st.error(
+            f"{error_count} blocking {label}. Fix mapping or source-data errors before importing."
+        )
+    if warning_count > 0:
+        st.warning(f"{warning_count} {label}. These rows were skipped.")
+    if info_count > 0:
+        st.info(f"{info_count} informational {label} (expected skips).")
+
     summary_df = (
-        issue_df.groupby("category", as_index=False)
+        issue_df.groupby(["severity", "category"], as_index=False)
         .size()
         .rename(columns={"size": "count"})
-        .sort_values("count", ascending=False)
     )
+    severity_order = {"error": 0, "warning": 1, "info": 2}
+    summary_df["severity_order"] = (
+        summary_df["severity"].map(lambda value: severity_order.get(str(value), 99)).astype(int)
+    )
+    summary_df = summary_df.sort_values(
+        ["severity_order", "count"],
+        ascending=[True, False],
+    ).drop(columns=["severity_order"])
 
     c1, c2 = st.columns([1, 2])
     c1.dataframe(summary_df.head(10), use_container_width=True, hide_index=True)
     c2.dataframe(issue_df.head(75), use_container_width=True, hide_index=True)
+
+
+def _delete_confirmation_ready(typed_confirmation: str, confirm_empty_account: bool) -> bool:
+    return (
+        confirm_empty_account
+        and typed_confirmation.strip().upper() == DELETE_ACCOUNT_CONFIRMATION_PHRASE
+    )
 
 
 def _render_readiness_panel(
@@ -542,11 +589,30 @@ def _render_accounts(engine, accounts: list[Account]) -> None:
             format_func=lambda account_id: account_lookup[account_id],
             key="remove_account_id",
         )
+        st.warning(
+            "This action is irreversible. If deletion succeeds, the selected account "
+            "record is permanently removed."
+        )
         confirm_remove = st.checkbox(
-            "I understand this only works for accounts without imported data.",
+            "I confirm this account has no imported trades, cash activity, or analytics rows.",
             key="confirm_remove_account",
         )
-        if st.button("Remove selected account", key="remove_account_btn", disabled=not confirm_remove):
+        typed_confirmation = st.text_input(
+            f'Type "{DELETE_ACCOUNT_CONFIRMATION_PHRASE}" to confirm permanent deletion.',
+            key="remove_account_confirmation_text",
+        )
+        ready_to_delete = _delete_confirmation_ready(typed_confirmation, confirm_remove)
+        if not ready_to_delete:
+            st.caption(
+                f'Enter "{DELETE_ACCOUNT_CONFIRMATION_PHRASE}" and confirm empty account data '
+                "to enable deletion."
+            )
+
+        if st.button(
+            "Permanently delete selected account",
+            key="remove_account_btn",
+            disabled=not ready_to_delete,
+        ):
             with Session(engine) as session:
                 ok, message = delete_account_if_empty(session, account_to_remove)
                 if ok:

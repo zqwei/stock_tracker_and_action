@@ -39,6 +39,77 @@ from portfolio_assistant.ui.streamlit.views.tax_year import (
 )
 
 
+def test_delete_confirmation_ready_requires_checkbox_and_phrase():
+    from portfolio_assistant.ui.streamlit import app as streamlit_app
+
+    phrase = streamlit_app.DELETE_ACCOUNT_CONFIRMATION_PHRASE
+    assert not streamlit_app._delete_confirmation_ready(phrase, False)
+    assert not streamlit_app._delete_confirmation_ready("DELETE", True)
+    assert streamlit_app._delete_confirmation_ready("delete account", True)
+    assert streamlit_app._delete_confirmation_ready(f"  {phrase}  ", True)
+
+
+def test_render_row_issues_routes_info_only_to_info(monkeypatch):
+    from portfolio_assistant.ui.streamlit import app as streamlit_app
+
+    calls: dict[str, list[str]] = {"info": [], "warning": [], "error": []}
+
+    class _DummyCol:
+        def dataframe(self, *_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(streamlit_app.st, "columns", lambda _spec: (_DummyCol(), _DummyCol()))
+    monkeypatch.setattr(streamlit_app.st, "info", lambda value: calls["info"].append(str(value)))
+    monkeypatch.setattr(
+        streamlit_app.st,
+        "warning",
+        lambda value: calls["warning"].append(str(value)),
+    )
+    monkeypatch.setattr(streamlit_app.st, "error", lambda value: calls["error"].append(str(value)))
+
+    streamlit_app._render_row_issues(
+        ["Row 1: skipped non-filled row (quantity <= 0)"],
+        "trade row issues",
+    )
+
+    assert calls["error"] == []
+    assert calls["warning"] == []
+    assert calls["info"] == ["1 informational trade row issues (expected skips)."]
+
+
+def test_render_row_issues_surfaces_warning_and_error(monkeypatch):
+    from portfolio_assistant.ui.streamlit import app as streamlit_app
+
+    calls: dict[str, list[str]] = {"info": [], "warning": [], "error": []}
+
+    class _DummyCol:
+        def dataframe(self, *_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(streamlit_app.st, "columns", lambda _spec: (_DummyCol(), _DummyCol()))
+    monkeypatch.setattr(streamlit_app.st, "info", lambda value: calls["info"].append(str(value)))
+    monkeypatch.setattr(
+        streamlit_app.st,
+        "warning",
+        lambda value: calls["warning"].append(str(value)),
+    )
+    monkeypatch.setattr(streamlit_app.st, "error", lambda value: calls["error"].append(str(value)))
+
+    streamlit_app._render_row_issues(
+        [
+            "Mapping error: missing required field 'executed_at'",
+            "Cash row 1: invalid amount",
+        ],
+        "cash row issues",
+    )
+
+    assert calls["info"] == []
+    assert calls["warning"] == ["1 cash row issues. These rows were skipped."]
+    assert calls["error"] == [
+        "1 blocking cash row issues. Fix mapping or source-data errors before importing."
+    ]
+
+
 def test_render_readiness_panel_shows_pending_state(monkeypatch):
     from portfolio_assistant.ui.streamlit import app as streamlit_app
 
