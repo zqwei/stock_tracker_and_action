@@ -180,6 +180,27 @@ def _candidate_replacements(
     return out
 
 
+def _parse_iso_date(value: Any) -> date | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _replacement_year_relation(*, sale_year: int, buy_date_text: Any) -> str:
+    buy_date = _parse_iso_date(buy_date_text)
+    if buy_date is None:
+        return "unknown"
+    if buy_date.year < sale_year:
+        return "prior_year"
+    if buy_date.year > sale_year:
+        return "next_year_or_later"
+    return "sale_year"
+
+
 def estimate_wash_sale_disallowance(
     session: Session,
     account_id: str | None = None,
@@ -329,6 +350,51 @@ def estimate_wash_sale_disallowance(
                 }
             )
 
+        disallowed_loss_by_replacement_year_relation = {
+            "prior_year": 0.0,
+            "sale_year": 0.0,
+            "next_year_or_later": 0.0,
+            "unknown": 0.0,
+        }
+        replacement_qty_by_replacement_year_relation = {
+            "prior_year": 0.0,
+            "sale_year": 0.0,
+            "next_year_or_later": 0.0,
+            "unknown": 0.0,
+        }
+        replacement_chain: list[dict[str, Any]] = []
+        cross_year_replacement_link_count = 0
+        for match in matches:
+            relation = _replacement_year_relation(
+                sale_year=sale.close_date.year,
+                buy_date_text=match.get("buy_date"),
+            )
+            allocated_qty_equiv = float(match["allocated_replacement_quantity_equiv"])
+            allocated_disallowed_loss = float(match["allocated_disallowed_loss"])
+            disallowed_loss_by_replacement_year_relation[relation] += allocated_disallowed_loss
+            replacement_qty_by_replacement_year_relation[relation] += allocated_qty_equiv
+            if relation in {"prior_year", "next_year_or_later"}:
+                cross_year_replacement_link_count += 1
+
+            replacement_chain.append(
+                {
+                    "buy_trade_row_id": int(match["buy_trade_row_id"]),
+                    "buy_trade_id": match["buy_trade_id"],
+                    "buy_date": match["buy_date"],
+                    "days_from_sale": int(match["days_from_sale"]),
+                    "replacement_year_relation": relation,
+                    "buy_account_id": match["buy_account_id"],
+                    "buy_account_type": match["buy_account_type"],
+                    "buy_instrument_type": match["buy_instrument_type"],
+                    "cross_account": bool(match["cross_account"]),
+                    "ira_replacement": bool(match["ira_replacement"]),
+                    "allocated_replacement_quantity_equiv": allocated_qty_equiv,
+                    "allocated_disallowed_loss": allocated_disallowed_loss,
+                    "basis_adjustment_applies": bool(match["basis_adjustment_applies"]),
+                    "adjustment_type": match["adjustment_type"],
+                }
+            )
+
         sale_account = accounts.get(sale.account_id)
         sales_out.append(
             {
@@ -356,6 +422,16 @@ def estimate_wash_sale_disallowance(
                 "deferred_loss_to_replacement_basis": deferred_loss_to_replacement_basis,
                 "permanently_disallowed_loss": permanently_disallowed_loss,
                 "has_ira_replacement": any(m["ira_replacement"] for m in matches),
+                "has_partial_replacement_chain": remaining_qty_equiv > EPSILON,
+                "has_cross_year_replacements": cross_year_replacement_link_count > 0,
+                "cross_year_replacement_link_count": cross_year_replacement_link_count,
+                "allocated_disallowed_loss_by_replacement_year_relation": (
+                    disallowed_loss_by_replacement_year_relation
+                ),
+                "allocated_replacement_quantity_equiv_by_replacement_year_relation": (
+                    replacement_qty_by_replacement_year_relation
+                ),
+                "replacement_chain": replacement_chain,
                 "matches": matches,
                 "adjustment_ledger_entries": adjustment_ledger_entries,
             }
@@ -406,6 +482,52 @@ def estimate_wash_sale_disallowance(
         )
     )
 
+    diagnostics = {
+        "sales_count": len(sales_out),
+        "partial_replacement_sale_count": 0,
+        "cross_year_replacement_sale_count": 0,
+        "cross_year_replacement_link_count": 0,
+        "partial_replacement_unmatched_quantity_equiv_total": 0.0,
+        "disallowed_loss_by_replacement_year_relation": {
+            "prior_year": 0.0,
+            "sale_year": 0.0,
+            "next_year_or_later": 0.0,
+            "unknown": 0.0,
+        },
+        "replacement_quantity_by_replacement_year_relation": {
+            "prior_year": 0.0,
+            "sale_year": 0.0,
+            "next_year_or_later": 0.0,
+            "unknown": 0.0,
+        },
+    }
+    for sale in sales_out:
+        if bool(sale.get("has_partial_replacement_chain")):
+            diagnostics["partial_replacement_sale_count"] += 1
+            diagnostics["partial_replacement_unmatched_quantity_equiv_total"] += float(
+                sale.get("unmatched_replacement_quantity_equiv") or 0.0
+            )
+        if bool(sale.get("has_cross_year_replacements")):
+            diagnostics["cross_year_replacement_sale_count"] += 1
+        diagnostics["cross_year_replacement_link_count"] += int(
+            sale.get("cross_year_replacement_link_count") or 0
+        )
+
+        loss_by_relation = (
+            sale.get("allocated_disallowed_loss_by_replacement_year_relation") or {}
+        )
+        qty_by_relation = (
+            sale.get("allocated_replacement_quantity_equiv_by_replacement_year_relation")
+            or {}
+        )
+        for relation in ("prior_year", "sale_year", "next_year_or_later", "unknown"):
+            diagnostics["disallowed_loss_by_replacement_year_relation"][relation] += float(
+                loss_by_relation.get(relation) or 0.0
+            )
+            diagnostics["replacement_quantity_by_replacement_year_relation"][relation] += float(
+                qty_by_relation.get(relation) or 0.0
+            )
+
     return {
         "mode": mode,
         "window_days": window_days,
@@ -416,6 +538,7 @@ def estimate_wash_sale_disallowance(
         "total_permanently_disallowed_loss": total_permanent,
         "adjustment_ledger": adjustment_ledger,
         "replacement_lot_adjustments": replacement_lot_adjustments_list,
+        "diagnostics": diagnostics,
     }
 
 

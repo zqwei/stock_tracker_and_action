@@ -575,6 +575,93 @@ def test_tax_year_report_term_splits_and_partial_boundary_wash_accounting():
         assert bool(summary["math_check_term_split_broker"])
         assert bool(summary["math_check_wash_term_split_irs"])
 
+        boundary = report["year_boundary_diagnostics"]
+        assert boundary["loss_sales_with_wash_disallowance_count"] == 1
+        assert boundary["boundary_loss_sales_count"] == 1
+        assert boundary["cross_year_replacement_link_count"] == 1
+        assert boundary["partial_replacement_sale_count"] == 1
+        assert isclose(
+            float(boundary["disallowed_loss_allocated_to_tax_year_replacements"]),
+            30.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+        assert isclose(
+            float(
+                boundary[
+                    "disallowed_loss_allocated_to_next_year_or_later_replacements"
+                ]
+            ),
+            20.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+        assert isclose(
+            float(boundary["year_end_open_lot_wash_basis_adjustment_total"]),
+            30.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+        assert boundary["year_end_open_lot_with_wash_adjustment_count"] == 1
+        assert len(boundary["replacement_chains"]) == 1
+        assert (
+            boundary["replacement_chains"][0]["cross_year_replacement_link_count"] == 1
+        )
+
+
+def test_tax_year_report_holding_period_boundary_splits_365_day_short_vs_366_day_long():
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        taxable = Account(broker="B1", account_label="Taxable", account_type="TAXABLE")
+        session.add(taxable)
+        session.flush()
+
+        session.add_all(
+            [
+                PnlRealized(
+                    account_id=taxable.id,
+                    symbol="AAPL",
+                    instrument_type="STOCK",
+                    close_date=date(2025, 1, 1),
+                    quantity=1,
+                    proceeds=1200.0,
+                    cost_basis=1000.0,
+                    fees=0.0,
+                    pnl=200.0,
+                    notes="FIFO close from 2024-01-02",
+                ),
+                PnlRealized(
+                    account_id=taxable.id,
+                    symbol="MSFT",
+                    instrument_type="STOCK",
+                    close_date=date(2025, 1, 1),
+                    quantity=1,
+                    proceeds=1300.0,
+                    cost_basis=1000.0,
+                    fees=0.0,
+                    pnl=300.0,
+                    notes="FIFO close from 2024-01-01",
+                ),
+            ]
+        )
+        session.commit()
+
+        report = generate_tax_year_report(session, tax_year=2025, account_id=taxable.id)
+        detail_by_symbol = {row["symbol"]: row for row in report["detail_rows"]}
+        assert detail_by_symbol["AAPL"]["term"] == "SHORT"
+        assert detail_by_symbol["MSFT"]["term"] == "LONG"
+
+        summary = report["summary"]
+        assert isclose(
+            float(summary["short_term_gain_or_loss"]), 200.0, rel_tol=0.0, abs_tol=1e-9
+        )
+        assert isclose(
+            float(summary["long_term_gain_or_loss"]), 300.0, rel_tol=0.0, abs_tol=1e-9
+        )
+        assert isclose(float(summary["total_gain_or_loss"]), 500.0, rel_tol=0.0, abs_tol=1e-9)
+
 
 def test_tax_report_totals_handles_zero_raw_gain_and_basis_fallback():
     detail_rows = [
