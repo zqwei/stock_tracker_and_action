@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from sqlalchemy import create_engine, event, inspect, select, text
@@ -88,6 +89,8 @@ SQLITE_REDUNDANT_INDEXES = [
     "DROP INDEX IF EXISTS ix_cash_activity_account_dedupe",
 ]
 
+BACKFILL_LOOKUP_CHUNK_SIZE = 800
+
 
 def _enable_sqlite_pragmas(engine: Engine) -> None:
     @event.listens_for(engine, "connect")
@@ -141,85 +144,164 @@ def _drop_sqlite_redundant_indexes(engine: Engine) -> None:
             conn.execute(text(statement))
 
 
+def _backfill_nullable_unique_key(
+    session: Session,
+    *,
+    model,
+    key_attr: str,
+    compute_key: Callable[[object], str],
+    batch_size: int = 2000,
+    lookup_chunk_size: int = BACKFILL_LOOKUP_CHUNK_SIZE,
+) -> None:
+    model_id = getattr(model, "id")
+    model_key = getattr(model, key_attr)
+    model_account = getattr(model, "account_id")
+
+    while True:
+        rows = list(
+            session.scalars(
+                select(model)
+                .where(model_key.is_(None))
+                .order_by(model_id.asc())
+                .limit(batch_size)
+            ).all()
+        )
+        if not rows:
+            break
+
+        keep_rows: list[tuple[object, str, str]] = []
+        seen_tokens: set[tuple[str, str]] = set()
+        for row in rows:
+            key_value = str(compute_key(row))
+            account_value = str(getattr(row, "account_id"))
+            token = (account_value, key_value)
+            if token in seen_tokens:
+                session.delete(row)
+                continue
+            seen_tokens.add(token)
+            keep_rows.append((row, account_value, key_value))
+
+        grouped_keys: dict[str, set[str]] = {}
+        for _row, account_value, key_value in keep_rows:
+            grouped_keys.setdefault(account_value, set()).add(key_value)
+
+        existing_by_token: dict[tuple[str, str], int] = {}
+        for account_value, key_values in grouped_keys.items():
+            key_list = list(key_values)
+            for start in range(0, len(key_list), lookup_chunk_size):
+                chunk = key_list[start : start + lookup_chunk_size]
+                stmt = (
+                    select(model_account, model_key, model_id)
+                    .where(
+                        model_account == account_value,
+                        model_key.in_(chunk),
+                        model_key.is_not(None),
+                    )
+                    .order_by(model_id.asc())
+                )
+                for account_id, key_val, row_id in session.execute(stmt):
+                    token = (str(account_id), str(key_val))
+                    row_id_int = int(row_id)
+                    existing_id = existing_by_token.get(token)
+                    if existing_id is None or row_id_int < existing_id:
+                        existing_by_token[token] = row_id_int
+
+        for row, account_value, key_value in keep_rows:
+            token = (account_value, key_value)
+            existing_id = existing_by_token.get(token)
+            row_id = int(getattr(row, "id"))
+            if existing_id is None:
+                setattr(row, key_attr, key_value)
+                continue
+            if existing_id < row_id:
+                session.delete(row)
+                continue
+            if existing_id > row_id:
+                existing_row = session.get(model, existing_id)
+                if existing_row is not None:
+                    session.delete(existing_row)
+                setattr(row, key_attr, key_value)
+                continue
+            setattr(row, key_attr, key_value)
+
+        session.commit()
+
+
+def _trade_raw_row_hash(row: TradeRaw) -> str:
+    payload = row.raw_payload if isinstance(row.raw_payload, dict) else {"raw": row.raw_payload}
+    return raw_row_hash(payload)
+
+
+def _trade_normalized_dedupe_key(row: TradeNormalized) -> str:
+    return trade_dedupe_key(
+        {
+            "account_id": row.account_id,
+            "broker": row.broker,
+            "trade_id": row.trade_id,
+            "executed_at": row.executed_at,
+            "instrument_type": row.instrument_type,
+            "symbol": row.symbol,
+            "side": row.side,
+            "option_symbol_raw": row.option_symbol_raw,
+            "underlying": row.underlying,
+            "expiration": row.expiration,
+            "strike": row.strike,
+            "multiplier": row.multiplier,
+            "quantity": row.quantity,
+            "price": row.price,
+            "fees": row.fees,
+            "net_amount": row.net_amount,
+            "currency": row.currency,
+        }
+    )
+
+
+def _cash_activity_dedupe_key(row: CashActivity) -> str:
+    return cash_dedupe_key(
+        {
+            "account_id": row.account_id,
+            "broker": row.broker,
+            "posted_at": row.posted_at,
+            "activity_type": row.activity_type,
+            "amount": row.amount,
+            "description": row.description,
+            "source": row.source,
+            "transfer_group_id": row.transfer_group_id,
+        }
+    )
+
+
 def _backfill_trade_raw_hashes(engine: Engine, batch_size: int = 2000) -> None:
     with Session(engine) as session:
-        while True:
-            rows = list(
-                session.scalars(
-                    select(TradeRaw).where(TradeRaw.row_hash.is_(None)).limit(batch_size)
-                ).all()
-            )
-            if not rows:
-                break
-            for row in rows:
-                payload = row.raw_payload if isinstance(row.raw_payload, dict) else {"raw": row.raw_payload}
-                row.row_hash = raw_row_hash(payload)
-            session.commit()
+        _backfill_nullable_unique_key(
+            session,
+            model=TradeRaw,
+            key_attr="row_hash",
+            compute_key=_trade_raw_row_hash,
+            batch_size=batch_size,
+        )
 
 
 def _backfill_trade_dedupe_keys(engine: Engine, batch_size: int = 2000) -> None:
     with Session(engine) as session:
-        while True:
-            rows = list(
-                session.scalars(
-                    select(TradeNormalized)
-                    .where(TradeNormalized.dedupe_key.is_(None))
-                    .limit(batch_size)
-                ).all()
-            )
-            if not rows:
-                break
-            for row in rows:
-                row.dedupe_key = trade_dedupe_key(
-                    {
-                        "account_id": row.account_id,
-                        "broker": row.broker,
-                        "trade_id": row.trade_id,
-                        "executed_at": row.executed_at,
-                        "instrument_type": row.instrument_type,
-                        "symbol": row.symbol,
-                        "side": row.side,
-                        "option_symbol_raw": row.option_symbol_raw,
-                        "underlying": row.underlying,
-                        "expiration": row.expiration,
-                        "strike": row.strike,
-                        "multiplier": row.multiplier,
-                        "quantity": row.quantity,
-                        "price": row.price,
-                        "fees": row.fees,
-                        "net_amount": row.net_amount,
-                        "currency": row.currency,
-                    }
-                )
-            session.commit()
+        _backfill_nullable_unique_key(
+            session,
+            model=TradeNormalized,
+            key_attr="dedupe_key",
+            compute_key=_trade_normalized_dedupe_key,
+            batch_size=batch_size,
+        )
 
 
 def _backfill_cash_dedupe_keys(engine: Engine, batch_size: int = 2000) -> None:
     with Session(engine) as session:
-        while True:
-            rows = list(
-                session.scalars(
-                    select(CashActivity)
-                    .where(CashActivity.dedupe_key.is_(None))
-                    .limit(batch_size)
-                ).all()
-            )
-            if not rows:
-                break
-            for row in rows:
-                row.dedupe_key = cash_dedupe_key(
-                    {
-                        "account_id": row.account_id,
-                        "broker": row.broker,
-                        "posted_at": row.posted_at,
-                        "activity_type": row.activity_type,
-                        "amount": row.amount,
-                        "description": row.description,
-                        "source": row.source,
-                        "transfer_group_id": row.transfer_group_id,
-                    }
-                )
-            session.commit()
+        _backfill_nullable_unique_key(
+            session,
+            model=CashActivity,
+            key_attr="dedupe_key",
+            compute_key=_cash_activity_dedupe_key,
+            batch_size=batch_size,
+        )
 
 
 def _backfill_sqlite_dedupe_columns(engine: Engine) -> None:

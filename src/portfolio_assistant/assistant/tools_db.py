@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from contextlib import contextmanager
 
-from sqlalchemy import case, delete, func, insert, select
+from sqlalchemy import case, delete, func, insert, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -216,12 +216,14 @@ def _bulk_insert_ignore_conflicts(
     if dialect_name == "sqlite":
         from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+        stmt = sqlite_insert(model).on_conflict_do_nothing(
+            index_elements=list(conflict_fields)
+        )
         for chunk in _chunked(rows, batch_size=batch_size):
-            stmt = sqlite_insert(model).values(chunk).on_conflict_do_nothing(
-                index_elements=list(conflict_fields)
-            )
-            result = session.execute(stmt)
-            inserted += max(int(result.rowcount or 0), 0)
+            before = int(session.scalar(text("SELECT total_changes()")) or 0)
+            session.execute(stmt, chunk)
+            after = int(session.scalar(text("SELECT total_changes()")) or 0)
+            inserted += max(after - before, 0)
         return inserted
 
     if dialect_name == "postgresql":
@@ -249,11 +251,8 @@ def insert_trade_import(
     raw_rows: Iterable[dict],
     normalized_rows: Iterable[dict],
 ) -> tuple[int, int]:
-    raw_payloads = list(raw_rows)
-    normalized_payloads = [dict(row) for row in normalized_rows]
-
     prepared_raw_rows: list[dict] = []
-    for idx, payload in enumerate(raw_payloads):
+    for idx, payload in enumerate(raw_rows):
         payload_dict = payload if isinstance(payload, dict) else {"raw": payload}
         prepared_raw_rows.append(
             {
@@ -269,7 +268,7 @@ def insert_trade_import(
         )
 
     prepared_normalized_rows: list[dict] = []
-    for row in normalized_payloads:
+    for row in normalized_rows:
         normalized = dict(row)
         normalized["dedupe_key"] = normalized.get("dedupe_key") or trade_dedupe_key(normalized)
         prepared_normalized_rows.append(normalized)
