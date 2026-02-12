@@ -125,6 +125,53 @@ def test_validate_broker_export_mapping_resolves_normalized_source_column_names(
     assert resolved_by_field["cost_basis"] == "Cost Basis"
 
 
+def test_validate_broker_export_mapping_resolves_token_subset_source_column_names():
+    mapping = {
+        "version": 1,
+        "mapping_kind": "broker_tax_export",
+        "name": "Token subset mapping",
+        "broker": "Example",
+        "output_schema": {"canonical_row_version": 1, "fields": ["date_sold", "proceeds", "cost_basis"]},
+        "columns": {
+            "date sold": {"field": "date_sold", "type": "date", "required": True},
+            "sales proceeds": {"field": "proceeds", "type": "money", "required": True},
+            "cost basis": {"field": "cost_basis", "type": "money", "required": True},
+        },
+    }
+    csv_columns = ["Date Sold (MM/DD/YYYY)", "Sales Proceeds USD", "Cost Basis Amount"]
+
+    normalized_mapping, errors = validate_broker_export_mapping(mapping, columns=csv_columns)
+
+    assert errors == []
+    resolved_by_field = {
+        rule["field"]: rule["source_column"]
+        for rule in normalized_mapping["columns"]
+    }
+    assert resolved_by_field["date_sold"] == "Date Sold (MM/DD/YYYY)"
+    assert resolved_by_field["proceeds"] == "Sales Proceeds USD"
+    assert resolved_by_field["cost_basis"] == "Cost Basis Amount"
+
+
+def test_validate_broker_export_mapping_reports_ambiguous_token_subset_source_column_names():
+    mapping = {
+        "version": 1,
+        "mapping_kind": "broker_tax_export",
+        "name": "Ambiguous token mapping",
+        "broker": "Example",
+        "output_schema": {"canonical_row_version": 1, "fields": ["date_sold", "proceeds", "cost_basis"]},
+        "columns": {
+            "date sold": {"field": "date_sold", "type": "date", "required": True},
+            "proceeds": {"field": "proceeds", "type": "money", "required": True},
+            "cost basis": {"field": "cost_basis", "type": "money", "required": True},
+        },
+    }
+    csv_columns = ["Date Sold Local", "Date Sold UTC", "Proceeds", "Cost Basis"]
+
+    _normalized_mapping, errors = validate_broker_export_mapping(mapping, columns=csv_columns)
+
+    assert any("matches multiple CSV columns by tokens" in error for error in errors), errors
+
+
 def test_broker_export_totals_sums_by_term():
     rows = [
         {

@@ -21,6 +21,7 @@ from portfolio_assistant.ingest.csv_mapping import (
     save_trade_mapping,
     suggest_trade_column_candidates,
     trade_mapping_hints,
+    validate_mapping,
 )
 
 
@@ -87,6 +88,24 @@ def test_infer_trade_column_map_webull_prefers_filled_time_avg_price_and_filled_
     hints = trade_mapping_hints(columns, broker="webull")
     assert any("Filled Time" in hint for hint in hints)
     assert any("Avg Price" in hint for hint in hints)
+
+
+def test_infer_trade_column_map_handles_token_variant_headers():
+    columns = [
+        "Trade Date / Time",
+        "Buy Or Sell",
+        "Filled Quantity",
+        "Average Fill Price",
+        "Ticker Symbol",
+    ]
+
+    mapping = infer_trade_column_map(columns, broker="generic")
+
+    assert mapping["executed_at"] == "Trade Date / Time"
+    assert mapping["side"] == "Buy Or Sell"
+    assert mapping["quantity"] == "Filled Quantity"
+    assert mapping["price"] == "Average Fill Price"
+    assert mapping["symbol"] == "Ticker Symbol"
 
 
 def test_normalize_trade_records_handles_webull_option_symbol_and_timezone():
@@ -162,6 +181,62 @@ def test_normalize_trade_records_accepts_punctuation_variant_mapping_source_name
     assert rows[0]["symbol"] == "AAPL"
     assert rows[0]["side"] == "BUY"
     assert rows[0]["quantity"] == 2.0
+
+
+def test_normalize_trade_records_accepts_token_subset_mapping_source_names():
+    df = pd.DataFrame(
+        [
+            {
+                "Trade Date / Time": "2025-01-05 10:35:00",
+                "Buy Or Sell": "BUY",
+                "Filled Quantity": "3",
+                "Average Fill Price": "12.5",
+                "Ticker Symbol": "NVDA",
+            }
+        ]
+    )
+    mapping = {
+        "executed_at": "trade date",
+        "side": "buy sell",
+        "quantity": "quantity",
+        "price": "avg price",
+        "symbol": "ticker symbol",
+    }
+
+    rows, issues = normalize_trade_records(
+        df=df,
+        mapping=mapping,
+        account_id="acc-1",
+        broker="generic",
+        default_instrument_type="STOCK",
+    )
+
+    assert issues == []
+    assert len(rows) == 1
+    assert rows[0]["symbol"] == "NVDA"
+    assert rows[0]["price"] == 12.5
+
+
+def test_validate_mapping_reports_ambiguous_token_subset_source_name():
+    columns = ["Trade Date Local", "Trade Date UTC", "Side", "Qty", "Price"]
+    mapping = {
+        "executed_at": "trade date",
+        "side": "side",
+        "quantity": "qty",
+        "price": "price",
+    }
+
+    cleaned, errors = validate_mapping(
+        mapping,
+        columns=columns,
+        canonical_fields=["executed_at", "side", "quantity", "price"],
+        required_fields=["executed_at", "side", "quantity", "price"],
+    )
+
+    assert cleaned["side"] == "Side"
+    assert cleaned["quantity"] == "Qty"
+    assert cleaned["price"] == "Price"
+    assert any("matches multiple CSV columns" in error for error in errors), errors
 
 
 def test_suggest_trade_column_candidates_returns_best_matches_for_missing_required_fields():
@@ -337,6 +412,42 @@ def test_normalize_trade_records_uses_default_instrument_type_for_unclear_mapped
     assert rows[0]["instrument_type"] == "OPTION"
     assert rows[0]["side"] == "SELL"
     assert rows[0]["multiplier"] == 100
+
+
+def test_normalize_trade_records_keeps_explicit_option_variant_when_default_is_stock():
+    df = pd.DataFrame(
+        [
+            {
+                "Trade Date": "2025-01-05",
+                "Type": "Equity Option",
+                "Buy/Sell": "SELL",
+                "Quantity": "1",
+                "Unit Price": "4.2",
+                "Option Symbol": "AAPL250221C00195000",
+            }
+        ]
+    )
+    mapping = {
+        "executed_at": "Trade Date",
+        "instrument_type": "Type",
+        "side": "Buy/Sell",
+        "quantity": "Quantity",
+        "price": "Unit Price",
+        "option_symbol_raw": "Option Symbol",
+    }
+
+    rows, issues = normalize_trade_records(
+        df=df,
+        mapping=mapping,
+        account_id="acc-1",
+        broker="generic",
+        default_instrument_type="STOCK",
+    )
+
+    assert issues == []
+    assert len(rows) == 1
+    assert rows[0]["instrument_type"] == "OPTION"
+    assert rows[0]["symbol"] == "AAPL"
 
 
 def test_normalize_trade_records_infers_fees_from_total_cost_for_options():

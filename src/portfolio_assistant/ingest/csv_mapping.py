@@ -95,8 +95,43 @@ def _match_key(text: str) -> str:
     return "".join(ch for ch in text.strip().lower() if ch.isalnum())
 
 
+_TOKEN_ALIASES = {
+    "avg": "average",
+    "qty": "quantity",
+    "amt": "amount",
+    "dt": "date",
+}
+
+
 def _tokenize(text: str) -> list[str]:
-    return [token for token in re.split(r"[^a-z0-9]+", text.strip().lower()) if token]
+    tokens = [token for token in re.split(r"[^a-z0-9]+", text.strip().lower()) if token]
+    return [_TOKEN_ALIASES.get(token, token) for token in tokens]
+
+
+def _resolve_by_token_subset(
+    query_text: str,
+    column_token_sets: dict[str, set[str]],
+) -> tuple[str | None, bool]:
+    query_tokens = set(_tokenize(query_text))
+    if not query_tokens:
+        return None, False
+
+    candidates: list[tuple[int, int, str]] = []
+    for column, tokens in column_token_sets.items():
+        if not query_tokens.issubset(tokens):
+            continue
+        extra_tokens = len(tokens - query_tokens)
+        candidates.append((extra_tokens, len(tokens), column))
+
+    if not candidates:
+        return None, False
+
+    candidates.sort()
+    best_extra, best_len, best_column = candidates[0]
+    ties = [entry for entry in candidates if entry[0] == best_extra and entry[1] == best_len]
+    if len(ties) > 1:
+        return None, True
+    return best_column, False
 
 
 def file_signature(columns: list[str]) -> str:
@@ -108,6 +143,7 @@ def _infer_with_template(
     columns: list[str], template: dict[str, list[str]]
 ) -> dict[str, str]:
     normalized_to_original = {_normalize(column): column for column in columns}
+    column_token_sets = {column: set(_tokenize(column)) for column in columns}
     compact_to_original: dict[str, str] = {}
     ambiguous_compact: set[str] = set()
     for column in columns:
@@ -129,6 +165,14 @@ def _infer_with_template(
                 compact_candidate = _match_key(candidate)
                 if compact_candidate and compact_candidate not in ambiguous_compact:
                     source_column = compact_to_original.get(compact_candidate)
+            if not source_column:
+                token_source, token_ambiguous = _resolve_by_token_subset(
+                    candidate,
+                    column_token_sets,
+                )
+                if token_ambiguous:
+                    continue
+                source_column = token_source
             if source_column:
                 mapping[canonical] = source_column
                 break
@@ -314,9 +358,11 @@ def validate_mapping(
     ambiguous_normalized_columns: set[str] = set()
     compact_columns: dict[str, str] = {}
     ambiguous_compact_columns: set[str] = set()
+    column_token_sets: dict[str, set[str]] = {}
     for col in columns or []:
         col_text = str(col)
         exact_columns[col_text] = col_text
+        column_token_sets[col_text] = set(_tokenize(col_text))
         normalized_col = _normalize(col_text)
         previous = normalized_columns.get(normalized_col)
         if previous is None:
@@ -388,6 +434,19 @@ def validate_mapping(
                         )
                         continue
                     resolved_source = compact_columns.get(compact_source)
+                    if resolved_source is None:
+                        token_source, token_ambiguous = _resolve_by_token_subset(
+                            source_text,
+                            column_token_sets,
+                        )
+                        if token_ambiguous:
+                            errors.append(
+                                "Source column "
+                                f"'{source_text}' for field '{resolved_canonical}' matches multiple CSV columns."
+                            )
+                            continue
+                        if token_source is not None:
+                            resolved_source = token_source
                     if resolved_source is None:
                         errors.append(
                             f"Source column '{source_text}' for field '{resolved_canonical}' is not present in the CSV."

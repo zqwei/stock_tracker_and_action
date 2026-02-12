@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -165,6 +166,57 @@ def _is_likely_instrument_type_column_name(column_name: str) -> bool:
     normalized = "".join(ch if ch.isalnum() else " " for ch in column_name.lower())
     tokens = {token for token in normalized.split() if token}
     return bool(tokens.intersection({"type", "instrument", "asset", "class"}))
+
+
+def _normalize_instrument_hint_text(value: object) -> str:
+    text = str(value or "").strip().upper()
+    if not text:
+        return ""
+    return " ".join(token for token in re.split(r"[^A-Z0-9]+", text) if token)
+
+
+def _mapped_instrument_values_are_clear(
+    df: pd.DataFrame,
+    column_name: str,
+    *,
+    sample_size: int = 50,
+) -> bool:
+    if column_name not in df.columns:
+        return False
+    series = df[column_name]
+    if series.empty:
+        return False
+
+    recognized = {
+        "STOCK",
+        "EQUITY",
+        "SHARE",
+        "SHARES",
+        "ETF",
+        "OPTION",
+        "OPTIONS",
+        "OPT",
+        "OPTION CONTRACT",
+        "OPTIONS CONTRACT",
+        "EQUITY OPTION",
+        "CALL",
+        "PUT",
+    }
+    unknown_markers = {"", "N/A", "NA", "--", "UNKNOWN", "UNSPECIFIED"}
+
+    checked = 0
+    clear = 0
+    for raw_value in series.head(sample_size).tolist():
+        normalized = _normalize_instrument_hint_text(raw_value)
+        if normalized in unknown_markers:
+            continue
+        checked += 1
+        if normalized in recognized:
+            clear += 1
+
+    if checked == 0:
+        return False
+    return (clear / checked) >= 0.8
 
 
 def _account_label(account: Account) -> str:
@@ -603,17 +655,28 @@ def _render_import_trades(
 
     default_instrument_type: str | None = None
     instrument_type_column = current_mapping.get("instrument_type")
+    instrument_values_clear = (
+        _mapped_instrument_values_are_clear(df, instrument_type_column)
+        if instrument_type_column
+        else False
+    )
     show_default_type_picker = (
         instrument_type_column is None
         or not _is_likely_instrument_type_column_name(instrument_type_column)
+        or not instrument_values_clear
     )
     if show_default_type_picker:
         if instrument_type_column is None:
             st.caption("No Instrument Type column mapped; choose a per-file default when needed.")
-        else:
+        elif not _is_likely_instrument_type_column_name(instrument_type_column):
             st.caption(
                 "Instrument Type is mapped to a non-type-like column "
                 f"(`{instrument_type_column}`). You can set a safe default below."
+            )
+        else:
+            st.caption(
+                "Mapped Instrument Type values appear unclear in this file. "
+                "Choose a safe default or keep Auto detect."
             )
         default_choice = st.selectbox(
             "Default instrument type (when type values are missing or unclear)",
