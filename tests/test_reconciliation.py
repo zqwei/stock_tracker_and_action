@@ -230,6 +230,10 @@ def test_reconciliation_checklist_mentions_partial_replacement_context():
                 ]
             }
         },
+        "year_boundary_diagnostics": {
+            "partial_replacement_sale_count": 1,
+            "partial_replacement_unmatched_quantity_equiv_total": 5.0,
+        },
     }
 
     mode_diffs = broker_vs_irs_diffs(report["detail_rows"])
@@ -239,3 +243,64 @@ def test_reconciliation_checklist_mentions_partial_replacement_context():
     lot_method = by_key["lot_method_mismatch"]
     assert not lot_method["flag"]
     assert "Partial replacement patterns detected on 1 sale(s)." in lot_method["reason"]
+    assert "Unmatched replacement quantity: 5 share-equivalent." in lot_method["reason"]
+
+
+def test_reconciliation_checklist_boundary_reason_includes_carryover_context():
+    report = {
+        "summary": {"tax_year": 2025},
+        "detail_rows": [
+            {
+                "sale_row_id": 30,
+                "symbol": "AAPL",
+                "description": "AAPL",
+                "date_sold": "2025-12-31",
+                "term": "SHORT",
+                "raw_gain_or_loss": -100.0,
+                "wash_sale_disallowed_broker": 0.0,
+                "wash_sale_disallowed_irs": 30.0,
+                "gain_or_loss": -70.0,
+            }
+        ],
+        "wash_sale_summary": {
+            "irs": {
+                "sales": [
+                    {
+                        "sale_row_id": 30,
+                        "symbol": "AAPL",
+                        "sale_date": "2025-12-31",
+                        "matches": [
+                            {
+                                "buy_date": "2024-12-28",
+                                "days_from_sale": -3,
+                                "cross_account": False,
+                                "ira_replacement": False,
+                                "buy_instrument_type": "STOCK",
+                            },
+                            {
+                                "buy_date": "2026-01-15",
+                                "days_from_sale": 15,
+                                "cross_account": False,
+                                "ira_replacement": False,
+                                "buy_instrument_type": "STOCK",
+                            },
+                        ],
+                    }
+                ]
+            }
+        },
+        "year_boundary_diagnostics": {
+            "disallowed_loss_allocated_to_prior_year_replacements": 10.0,
+            "disallowed_loss_allocated_to_next_year_or_later_replacements": 20.0,
+        },
+    }
+
+    mode_diffs = broker_vs_irs_diffs(report["detail_rows"])
+    checklist = build_reconciliation_checklist(report, mode_diffs=mode_diffs)
+    by_key = {row["key"]: row for row in checklist}
+
+    boundary = by_key["missing_boundary_data"]
+    assert boundary["flag"]
+    assert "Year-boundary context" in boundary["reason"]
+    assert "pre-2025 replacement buys" in boundary["reason"]
+    assert "post-2025 replacement buys" in boundary["reason"]

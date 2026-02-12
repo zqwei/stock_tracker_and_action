@@ -592,17 +592,24 @@ def _sale_date_from_row(row: dict[str, Any]) -> date | None:
         return None
 
 
+def _format_compact_quantity(value: float, digits: int = 4) -> str:
+    formatted = f"{value:.{digits}f}"
+    return formatted.rstrip("0").rstrip(".")
+
+
 def _build_checklist_rows(
     *,
     tax_year: int | None,
     mode_diffs: dict[str, Any],
     wash_sale_summary: dict[str, Any] | None,
     detail_rows: list[dict[str, Any]],
+    year_boundary_diagnostics: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     irs_matches = _collect_irs_matches(wash_sale_summary)
     mode_totals = mode_diffs.get("totals") or {}
     gain_delta_abs = abs(_as_float(mode_totals.get("gain_or_loss_delta"), 0.0))
     wash_delta_abs = abs(_as_float(mode_totals.get("wash_sale_disallowed_delta"), 0.0))
+    year_boundary_diagnostics = year_boundary_diagnostics or {}
 
     missing_boundary_evidence = []
     if tax_year is not None:
@@ -715,6 +722,65 @@ def _build_checklist_rows(
     cross_account_symbols = _sample_symbols(cross_account_evidence)
     options_symbols = _sample_symbols(options_evidence)
     lot_mismatch_symbols = _sample_symbols(lot_mismatch_evidence)
+    prior_year_disallowed_loss = _as_float(
+        year_boundary_diagnostics.get("disallowed_loss_allocated_to_prior_year_replacements"),
+        0.0,
+    )
+    next_year_disallowed_loss = _as_float(
+        year_boundary_diagnostics.get(
+            "disallowed_loss_allocated_to_next_year_or_later_replacements"
+        ),
+        0.0,
+    )
+    partial_unmatched_qty = _as_float(
+        year_boundary_diagnostics.get("partial_replacement_unmatched_quantity_equiv_total"),
+        0.0,
+    )
+    boundary_context_parts: list[str] = []
+    if prior_year_disallowed_loss > EPSILON:
+        if tax_year is not None:
+            boundary_context_parts.append(
+                f"${prior_year_disallowed_loss:,.2f} linked to pre-{tax_year} replacement buys"
+            )
+        else:
+            boundary_context_parts.append(
+                f"${prior_year_disallowed_loss:,.2f} linked to prior-year replacement buys"
+            )
+    if next_year_disallowed_loss > EPSILON:
+        if tax_year is not None:
+            boundary_context_parts.append(
+                f"${next_year_disallowed_loss:,.2f} deferred to post-{tax_year} replacement buys"
+            )
+        else:
+            boundary_context_parts.append(
+                f"${next_year_disallowed_loss:,.2f} deferred to next-year replacement buys"
+            )
+    boundary_context_text = (
+        " Year-boundary context: " + "; ".join(boundary_context_parts) + "."
+        if boundary_context_parts
+        else ""
+    )
+
+    partial_replacement_sale_count = len(partial_replacement_evidence)
+    diagnostics_partial_sale_count = int(
+        _as_float(
+            year_boundary_diagnostics.get("partial_replacement_sale_count"),
+            float(partial_replacement_sale_count),
+        )
+    )
+    if diagnostics_partial_sale_count > partial_replacement_sale_count:
+        partial_replacement_sale_count = diagnostics_partial_sale_count
+
+    partial_replacement_reason = ""
+    if partial_replacement_sale_count > 0:
+        partial_replacement_reason = (
+            f" Partial replacement patterns detected on {partial_replacement_sale_count} sale(s)."
+        )
+        if partial_unmatched_qty > EPSILON:
+            partial_replacement_reason += (
+                " Unmatched replacement quantity: "
+                f"{_format_compact_quantity(partial_unmatched_qty)} share-equivalent."
+            )
 
     corporate_action_evidence = []
     for row in detail_rows:
@@ -738,11 +804,13 @@ def _build_checklist_rows(
                 (
                     f"Detected {len(missing_boundary_evidence)} cross-year replacement link(s)"
                     f" across boundary sales (sample: {', '.join(missing_boundary_symbols) or 'n/a'})."
+                    + boundary_context_text
                 )
                 if missing_boundary_evidence
                 else (
                     "Boundary-period sales plus material broker-vs-IRS deltas suggest"
                     " possible missing Y-1/Y+1 trade history."
+                    + boundary_context_text
                     if missing_boundary_flag
                     else "No boundary-data warning signals detected."
                 )
@@ -750,7 +818,11 @@ def _build_checklist_rows(
             "evidence": missing_boundary_evidence,
             "signal_count": len(missing_boundary_evidence) or len(boundary_sale_evidence),
             "sample_symbols": missing_boundary_symbols,
-            "links": ["mode_diffs.by_sale_date", "mode_diffs.by_trade"],
+            "links": [
+                "mode_diffs.by_sale_date",
+                "mode_diffs.by_trade",
+                "year_boundary_diagnostics",
+            ],
         },
         {
             "key": "cross_account_replacements_likely",
@@ -802,12 +874,7 @@ def _build_checklist_rows(
                 if lot_mismatch_evidence
                 else (
                     "All mode differences are explained by wash-sale adjustments."
-                    + (
-                        f" Partial replacement patterns detected on {len(partial_replacement_evidence)}"
-                        " sale(s)."
-                        if partial_replacement_evidence
-                        else ""
-                    )
+                    + partial_replacement_reason
                 )
             ),
             "evidence": lot_mismatch_evidence,
@@ -844,11 +911,13 @@ def build_reconciliation_checklist(
     if mode_diffs is None:
         mode_diffs = broker_vs_irs_diffs(detail_rows)
     wash_sale_summary = report.get("wash_sale_summary") or {}
+    year_boundary_diagnostics = report.get("year_boundary_diagnostics") or {}
     return _build_checklist_rows(
         tax_year=tax_year,
         mode_diffs=mode_diffs,
         wash_sale_summary=wash_sale_summary,
         detail_rows=detail_rows,
+        year_boundary_diagnostics=year_boundary_diagnostics,
     )
 
 

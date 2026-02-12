@@ -505,6 +505,210 @@ def year_end_lot_snapshot(
     return rows
 
 
+def _parse_iso_date(value: Any) -> date | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _replacement_year_relation_for_tax_year(*, tax_year: int, buy_date_text: Any) -> str:
+    buy_date = _parse_iso_date(buy_date_text)
+    if buy_date is None:
+        return "unknown"
+    if buy_date.year < tax_year:
+        return "prior_year"
+    if buy_date.year > tax_year:
+        return "next_year_or_later"
+    return "tax_year"
+
+
+def _build_year_boundary_diagnostics(
+    *,
+    tax_year: int,
+    irs_wash: dict[str, Any],
+    year_end_snapshot: list[dict[str, Any]],
+) -> dict[str, Any]:
+    relation_loss_totals = {
+        "prior_year": 0.0,
+        "tax_year": 0.0,
+        "next_year_or_later": 0.0,
+        "unknown": 0.0,
+    }
+    relation_qty_totals = {
+        "prior_year": 0.0,
+        "tax_year": 0.0,
+        "next_year_or_later": 0.0,
+        "unknown": 0.0,
+    }
+
+    boundary_sales_count = 0
+    partial_replacement_sale_count = 0
+    partial_unmatched_quantity_equiv_total = 0.0
+    cross_year_links: list[dict[str, Any]] = []
+    replacement_chains: list[dict[str, Any]] = []
+
+    sales = irs_wash.get("sales") or []
+    for sale in sales:
+        sale_row_id = int(sale.get("sale_row_id") or 0)
+        sale_symbol = _normalize_symbol(str(sale.get("symbol") or ""))
+        sale_date_text = str(sale.get("sale_date") or "").strip()
+        sale_date = _parse_iso_date(sale_date_text)
+
+        if sale_date and sale_date.year == tax_year and sale_date.month in {1, 12}:
+            boundary_sales_count += 1
+
+        matched_qty = float(sale.get("matched_replacement_quantity_equiv") or 0.0)
+        sale_qty = float(sale.get("sale_quantity_equiv") or 0.0)
+        unmatched_qty = max(float(sale.get("unmatched_replacement_quantity_equiv") or 0.0), 0.0)
+        has_partial_replacement = sale_qty > SNAPSHOT_EPSILON and unmatched_qty > SNAPSHOT_EPSILON
+        if has_partial_replacement:
+            partial_replacement_sale_count += 1
+            partial_unmatched_quantity_equiv_total += unmatched_qty
+
+        chain_links: list[dict[str, Any]] = []
+        for match in sale.get("matches") or []:
+            buy_date_text = str(match.get("buy_date") or "").strip()
+            relation = _replacement_year_relation_for_tax_year(
+                tax_year=tax_year,
+                buy_date_text=buy_date_text,
+            )
+            allocated_qty_equiv = float(match.get("allocated_replacement_quantity_equiv") or 0.0)
+            allocated_disallowed_loss = float(match.get("allocated_disallowed_loss") or 0.0)
+            relation_loss_totals[relation] += allocated_disallowed_loss
+            relation_qty_totals[relation] += allocated_qty_equiv
+
+            link = {
+                "sale_row_id": sale_row_id,
+                "symbol": sale_symbol,
+                "sale_date": sale_date_text,
+                "buy_trade_row_id": int(match.get("buy_trade_row_id") or 0),
+                "buy_date": buy_date_text,
+                "replacement_year_relation_to_tax_year": relation,
+                "days_from_sale": int(match.get("days_from_sale") or 0),
+                "cross_account": bool(match.get("cross_account")),
+                "ira_replacement": bool(match.get("ira_replacement")),
+                "allocated_replacement_quantity_equiv": allocated_qty_equiv,
+                "allocated_disallowed_loss": allocated_disallowed_loss,
+            }
+            chain_links.append(link)
+            if relation in {"prior_year", "next_year_or_later"}:
+                cross_year_links.append(link)
+
+        chain_links.sort(
+            key=lambda row: (
+                str(row["buy_date"]),
+                int(row["buy_trade_row_id"]),
+            )
+        )
+        replacement_chains.append(
+            {
+                "sale_row_id": sale_row_id,
+                "symbol": sale_symbol,
+                "sale_date": sale_date_text,
+                "sale_quantity_equiv": sale_qty,
+                "matched_replacement_quantity_equiv": matched_qty,
+                "unmatched_replacement_quantity_equiv": unmatched_qty,
+                "disallowed_loss": float(sale.get("disallowed_loss") or 0.0),
+                "has_partial_replacement": has_partial_replacement,
+                "replacement_link_count": len(chain_links),
+                "cross_year_replacement_link_count": sum(
+                    1
+                    for row in chain_links
+                    if row["replacement_year_relation_to_tax_year"]
+                    in {"prior_year", "next_year_or_later"}
+                ),
+                "links": chain_links,
+            }
+        )
+
+    replacement_chains.sort(
+        key=lambda row: (
+            str(row["sale_date"]),
+            int(row["sale_row_id"]),
+        )
+    )
+
+    cross_year_sample_symbols: list[str] = []
+    for row in cross_year_links:
+        symbol = _normalize_symbol(row.get("symbol"))
+        if not symbol or symbol in cross_year_sample_symbols:
+            continue
+        cross_year_sample_symbols.append(symbol)
+        if len(cross_year_sample_symbols) >= 5:
+            break
+
+    year_end_wash_basis_adjustment_total = float(
+        sum(float(row.get("wash_sale_basis_adjustment") or 0.0) for row in year_end_snapshot)
+    )
+    year_end_open_lot_with_wash_adjustment_count = sum(
+        1
+        for row in year_end_snapshot
+        if abs(float(row.get("wash_sale_basis_adjustment") or 0.0)) > SNAPSHOT_EPSILON
+    )
+
+    notes: list[str] = []
+    if relation_loss_totals["next_year_or_later"] > SNAPSHOT_EPSILON:
+        notes.append(
+            "Portions of tax-year wash disallowance were allocated to post-year replacement buys."
+        )
+    if relation_loss_totals["prior_year"] > SNAPSHOT_EPSILON:
+        notes.append(
+            "Portions of tax-year wash disallowance were linked to replacement buys opened before tax-year start."
+        )
+    if partial_replacement_sale_count > 0:
+        notes.append(
+            "Partial replacement chains were detected; some loss-sale quantity remained unmatched."
+        )
+
+    return {
+        "tax_year": tax_year,
+        "loss_sales_with_wash_disallowance_count": len(sales),
+        "boundary_loss_sales_count": boundary_sales_count,
+        "cross_year_replacement_link_count": len(cross_year_links),
+        "cross_year_replacement_sale_count": len(
+            {int(row.get("sale_row_id") or 0) for row in cross_year_links}
+        ),
+        "cross_year_sample_symbols": cross_year_sample_symbols,
+        "partial_replacement_sale_count": partial_replacement_sale_count,
+        "partial_replacement_unmatched_quantity_equiv_total": (
+            partial_unmatched_quantity_equiv_total
+        ),
+        "disallowed_loss_allocated_to_prior_year_replacements": relation_loss_totals[
+            "prior_year"
+        ],
+        "disallowed_loss_allocated_to_tax_year_replacements": relation_loss_totals[
+            "tax_year"
+        ],
+        "disallowed_loss_allocated_to_next_year_or_later_replacements": relation_loss_totals[
+            "next_year_or_later"
+        ],
+        "disallowed_loss_allocated_to_unknown_replacement_year": relation_loss_totals[
+            "unknown"
+        ],
+        "replacement_quantity_allocated_to_prior_year_replacements": relation_qty_totals[
+            "prior_year"
+        ],
+        "replacement_quantity_allocated_to_tax_year_replacements": relation_qty_totals[
+            "tax_year"
+        ],
+        "replacement_quantity_allocated_to_next_year_or_later_replacements": relation_qty_totals[
+            "next_year_or_later"
+        ],
+        "replacement_quantity_allocated_to_unknown_replacement_year": relation_qty_totals[
+            "unknown"
+        ],
+        "year_end_open_lot_wash_basis_adjustment_total": year_end_wash_basis_adjustment_total,
+        "year_end_open_lot_with_wash_adjustment_count": year_end_open_lot_with_wash_adjustment_count,
+        "replacement_chains": replacement_chains,
+        "cross_year_links": cross_year_links,
+        "notes": notes,
+    }
+
+
 def generate_tax_year_report(
     session: Session, tax_year: int, account_id: str | None = None
 ) -> dict[str, Any]:
@@ -641,6 +845,11 @@ def generate_tax_year_report(
     year_end_wash_adjustment_total = float(
         sum(float(row["wash_sale_basis_adjustment"]) for row in year_end_snapshot)
     )
+    year_boundary_diagnostics = _build_year_boundary_diagnostics(
+        tax_year=tax_year,
+        irs_wash=irs_wash,
+        year_end_snapshot=year_end_snapshot,
+    )
 
     summary = {
         "tax_year": tax_year,
@@ -671,6 +880,17 @@ def generate_tax_year_report(
         "year_end_raw_basis_total": year_end_raw_basis_total,
         "year_end_adjusted_basis_total": year_end_adjusted_basis_total,
         "year_end_wash_basis_adjustment_total": year_end_wash_adjustment_total,
+        "year_boundary_cross_year_replacement_link_count": year_boundary_diagnostics[
+            "cross_year_replacement_link_count"
+        ],
+        "year_boundary_partial_replacement_sale_count": year_boundary_diagnostics[
+            "partial_replacement_sale_count"
+        ],
+        "year_boundary_disallowed_loss_allocated_to_next_year_or_later_replacements": (
+            year_boundary_diagnostics[
+                "disallowed_loss_allocated_to_next_year_or_later_replacements"
+            ]
+        ),
         "math_check_raw": abs((total_proceeds - total_cost_basis) - total_raw_gain_loss) <= 1e-6,
         "math_check_adjusted": abs(
             (total_raw_gain_loss + total_wash_irs) - total_adjusted_gain_loss
@@ -707,6 +927,7 @@ def generate_tax_year_report(
         "summary": summary,
         "detail_rows": rows,
         "year_end_lot_snapshot": year_end_snapshot,
+        "year_boundary_diagnostics": year_boundary_diagnostics,
         "wash_sale_summary": {
             "broker": {
                 "total_disallowed_loss": broker_wash["total_disallowed_loss"],

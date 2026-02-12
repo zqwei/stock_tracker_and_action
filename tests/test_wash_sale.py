@@ -662,3 +662,52 @@ def test_wash_sale_partial_replacement_across_year_boundary_is_allocated_correct
             rel_tol=0.0,
             abs_tol=1e-9,
         )
+        assert sale["has_partial_replacement_chain"]
+        assert sale["has_cross_year_replacements"]
+        assert int(sale["cross_year_replacement_link_count"]) == 1
+        assert isclose(
+            float(
+                sale["allocated_disallowed_loss_by_replacement_year_relation"]["sale_year"]
+            ),
+            30.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+        assert isclose(
+            float(
+                sale["allocated_disallowed_loss_by_replacement_year_relation"][
+                    "next_year_or_later"
+                ]
+            ),
+            20.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+
+        replacement_chain = sale["replacement_chain"]
+        assert len(replacement_chain) == 2
+        assert [row["replacement_year_relation"] for row in replacement_chain] == [
+            "sale_year",
+            "next_year_or_later",
+        ]
+
+        diagnostics = analysis["diagnostics"]
+        assert diagnostics["partial_replacement_sale_count"] == 1
+        assert diagnostics["cross_year_replacement_sale_count"] == 1
+        assert diagnostics["cross_year_replacement_link_count"] == 1
+        assert isclose(
+            float(diagnostics["partial_replacement_unmatched_quantity_equiv_total"]),
+            5.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+        assert isclose(
+            float(
+                diagnostics["disallowed_loss_by_replacement_year_relation"][
+                    "next_year_or_later"
+                ]
+            ),
+            20.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
