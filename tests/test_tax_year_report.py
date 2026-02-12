@@ -406,6 +406,176 @@ def test_tax_year_report_year_end_lot_snapshot_includes_wash_adjusted_basis():
         )
 
 
+def test_tax_year_report_term_splits_and_partial_boundary_wash_accounting():
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        taxable = Account(broker="B1", account_label="Taxable", account_type="TAXABLE")
+        session.add(taxable)
+        session.flush()
+
+        session.add_all(
+            [
+                TradeNormalized(
+                    account_id=taxable.id,
+                    broker="B1",
+                    executed_at=datetime(2023, 1, 2, 10, 0, 0),
+                    instrument_type="STOCK",
+                    symbol="MSFT",
+                    side="BUY",
+                    quantity=10,
+                    price=100.0,
+                    fees=0.0,
+                    net_amount=-1000.0,
+                    multiplier=1,
+                    currency="USD",
+                ),
+                TradeNormalized(
+                    account_id=taxable.id,
+                    broker="B1",
+                    executed_at=datetime(2025, 3, 3, 10, 0, 0),
+                    instrument_type="STOCK",
+                    symbol="MSFT",
+                    side="SELL",
+                    quantity=10,
+                    price=130.0,
+                    fees=0.0,
+                    net_amount=1300.0,
+                    multiplier=1,
+                    currency="USD",
+                ),
+                TradeNormalized(
+                    account_id=taxable.id,
+                    broker="B1",
+                    executed_at=datetime(2024, 12, 20, 10, 0, 0),
+                    instrument_type="STOCK",
+                    symbol="AAPL",
+                    side="BUY",
+                    quantity=10,
+                    price=100.0,
+                    fees=0.0,
+                    net_amount=-1000.0,
+                    multiplier=1,
+                    currency="USD",
+                ),
+                TradeNormalized(
+                    account_id=taxable.id,
+                    broker="B1",
+                    executed_at=datetime(2025, 12, 15, 10, 0, 0),
+                    instrument_type="STOCK",
+                    symbol="AAPL",
+                    side="SELL",
+                    quantity=10,
+                    price=90.0,
+                    fees=0.0,
+                    net_amount=900.0,
+                    multiplier=1,
+                    currency="USD",
+                ),
+                TradeNormalized(
+                    account_id=taxable.id,
+                    broker="B1",
+                    executed_at=datetime(2025, 12, 20, 10, 0, 0),
+                    instrument_type="STOCK",
+                    symbol="AAPL",
+                    side="BUY",
+                    quantity=3,
+                    price=91.0,
+                    fees=0.0,
+                    net_amount=-273.0,
+                    multiplier=1,
+                    currency="USD",
+                ),
+                TradeNormalized(
+                    account_id=taxable.id,
+                    broker="B1",
+                    executed_at=datetime(2026, 1, 10, 10, 0, 0),
+                    instrument_type="STOCK",
+                    symbol="AAPL",
+                    side="BUY",
+                    quantity=2,
+                    price=92.0,
+                    fees=0.0,
+                    net_amount=-184.0,
+                    multiplier=1,
+                    currency="USD",
+                ),
+            ]
+        )
+        session.flush()
+
+        recompute_pnl(session)
+        session.commit()
+
+        report = generate_tax_year_report(session, tax_year=2025, account_id=taxable.id)
+        assert report["summary"]["rows"] == 2
+
+        detail_by_symbol = {row["symbol"]: row for row in report["detail_rows"]}
+        assert detail_by_symbol["MSFT"]["term"] == "LONG"
+        assert detail_by_symbol["AAPL"]["term"] == "SHORT"
+        assert isclose(
+            float(detail_by_symbol["AAPL"]["wash_sale_disallowed"]),
+            50.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+
+        summary = report["summary"]
+        assert isclose(
+            float(summary["short_term_gain_or_loss"]),
+            -50.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+        assert isclose(
+            float(summary["long_term_gain_or_loss"]),
+            300.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+        assert isclose(float(summary["total_gain_or_loss"]), 250.0, rel_tol=0.0, abs_tol=1e-9)
+        assert isclose(
+            float(summary["short_term_gain_or_loss_broker"]),
+            -50.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+        assert isclose(
+            float(summary["long_term_gain_or_loss_broker"]),
+            300.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+        assert isclose(
+            float(summary["total_gain_or_loss_broker"]),
+            250.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+        assert isclose(
+            float(summary["short_term_wash_sale_disallowed_irs"]),
+            50.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+        assert isclose(
+            float(summary["short_term_wash_sale_disallowed_broker"]),
+            50.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+        assert isclose(
+            float(summary["long_term_wash_sale_disallowed_irs"]),
+            0.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+        assert bool(summary["math_check_term_split_irs"])
+        assert bool(summary["math_check_term_split_broker"])
+        assert bool(summary["math_check_wash_term_split_irs"])
+
+
 def test_tax_report_totals_handles_zero_raw_gain_and_basis_fallback():
     detail_rows = [
         {

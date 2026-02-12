@@ -170,3 +170,72 @@ def test_app_vs_broker_diff_tables_support_symbol_date_and_term_drilldowns():
         rel_tol=0.0,
         abs_tol=1e-9,
     )
+
+
+def test_reconciliation_checklist_infers_boundary_warning_from_mode_deltas():
+    report = {
+        "summary": {"tax_year": 2025},
+        "detail_rows": [
+            {
+                "sale_row_id": 10,
+                "symbol": "AAPL",
+                "description": "AAPL",
+                "date_sold": "2025-12-29",
+                "term": "SHORT",
+                "raw_gain_or_loss": -100.0,
+                "wash_sale_disallowed_broker": 0.0,
+                "wash_sale_disallowed_irs": 70.0,
+                "gain_or_loss": -30.0,
+            }
+        ],
+        "wash_sale_summary": {"irs": {"sales": []}},
+    }
+
+    mode_diffs = broker_vs_irs_diffs(report["detail_rows"])
+    checklist = build_reconciliation_checklist(report, mode_diffs=mode_diffs)
+    by_key = {row["key"]: row for row in checklist}
+    boundary = by_key["missing_boundary_data"]
+    assert boundary["flag"]
+    assert boundary["signal_count"] == 1
+    assert "Boundary-period sales plus material broker-vs-IRS deltas" in boundary["reason"]
+
+
+def test_reconciliation_checklist_mentions_partial_replacement_context():
+    report = {
+        "summary": {"tax_year": 2025},
+        "detail_rows": [
+            {
+                "sale_row_id": 20,
+                "symbol": "AAPL",
+                "description": "AAPL",
+                "date_sold": "2025-12-15",
+                "term": "SHORT",
+                "raw_gain_or_loss": -100.0,
+                "wash_sale_disallowed_broker": 0.0,
+                "wash_sale_disallowed_irs": 50.0,
+                "gain_or_loss": -50.0,
+            }
+        ],
+        "wash_sale_summary": {
+            "irs": {
+                "sales": [
+                    {
+                        "sale_row_id": 20,
+                        "symbol": "AAPL",
+                        "sale_date": "2025-12-15",
+                        "sale_quantity_equiv": 10.0,
+                        "matched_replacement_quantity_equiv": 5.0,
+                        "matches": [],
+                    }
+                ]
+            }
+        },
+    }
+
+    mode_diffs = broker_vs_irs_diffs(report["detail_rows"])
+    checklist = build_reconciliation_checklist(report, mode_diffs=mode_diffs)
+    by_key = {row["key"]: row for row in checklist}
+
+    lot_method = by_key["lot_method_mismatch"]
+    assert not lot_method["flag"]
+    assert "Partial replacement patterns detected on 1 sale(s)." in lot_method["reason"]

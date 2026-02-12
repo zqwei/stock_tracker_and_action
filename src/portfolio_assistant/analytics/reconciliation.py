@@ -566,6 +566,32 @@ def _collect_irs_matches(wash_sale_summary: dict[str, Any] | None) -> list[dict[
     return matches
 
 
+def _sample_symbols(
+    evidence: list[dict[str, Any]], symbol_key: str = "symbol", limit: int = 3
+) -> list[str]:
+    seen: list[str] = []
+    for row in evidence:
+        symbol = _normalize_symbol(row.get(symbol_key))
+        if not symbol:
+            continue
+        if symbol in seen:
+            continue
+        seen.append(symbol)
+        if len(seen) >= limit:
+            break
+    return seen
+
+
+def _sale_date_from_row(row: dict[str, Any]) -> date | None:
+    sale_date_text = _row_date_key(row)
+    if not sale_date_text:
+        return None
+    try:
+        return datetime.strptime(sale_date_text, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
 def _build_checklist_rows(
     *,
     tax_year: int | None,
@@ -574,6 +600,9 @@ def _build_checklist_rows(
     detail_rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     irs_matches = _collect_irs_matches(wash_sale_summary)
+    mode_totals = mode_diffs.get("totals") or {}
+    gain_delta_abs = abs(_as_float(mode_totals.get("gain_or_loss_delta"), 0.0))
+    wash_delta_abs = abs(_as_float(mode_totals.get("wash_sale_disallowed_delta"), 0.0))
 
     missing_boundary_evidence = []
     if tax_year is not None:
@@ -597,6 +626,41 @@ def _build_checklist_rows(
                         "buy_date": buy_date.isoformat(),
                     }
                 )
+
+    boundary_sale_evidence = []
+    if tax_year is not None:
+        for row in detail_rows:
+            sale_date = _sale_date_from_row(row)
+            if sale_date is None or sale_date.year != tax_year:
+                continue
+            if sale_date.month not in {1, 12}:
+                continue
+            boundary_sale_evidence.append(
+                {
+                    "sale_row_id": int(_as_float(row.get("sale_row_id"), 0.0)),
+                    "symbol": _row_symbol_key(row),
+                    "sale_date": sale_date.isoformat(),
+                }
+            )
+
+    partial_replacement_evidence = []
+    irs_sales = ((wash_sale_summary or {}).get("irs") or {}).get("sales") or []
+    for sale in irs_sales:
+        matched_qty = _as_float(sale.get("matched_replacement_quantity_equiv"), 0.0)
+        sale_qty = _as_float(sale.get("sale_quantity_equiv"), 0.0)
+        if sale_qty <= EPSILON:
+            continue
+        if matched_qty >= (sale_qty - EPSILON):
+            continue
+        partial_replacement_evidence.append(
+            {
+                "sale_row_id": int(_as_float(sale.get("sale_row_id"), 0.0)),
+                "symbol": _normalize_symbol(sale.get("symbol")),
+                "sale_date": _coerce_iso_date_text(sale.get("sale_date")),
+                "matched_replacement_quantity_equiv": matched_qty,
+                "sale_quantity_equiv": sale_qty,
+            }
+        )
 
     cross_account_evidence = [
         {
@@ -634,6 +698,24 @@ def _build_checklist_rows(
         and abs(_as_float(row.get("wash_sale_disallowed_delta"), 0.0)) <= EPSILON
     ]
 
+    missing_boundary_flag = bool(missing_boundary_evidence)
+    if (
+        not missing_boundary_flag
+        and boundary_sale_evidence
+        and wash_delta_abs > EPSILON
+        and gain_delta_abs > EPSILON
+    ):
+        # If we have boundary-period sales and material wash/gain deltas without direct cross-year
+        # evidence, warn that Y-1/Y+1 history may still be incomplete.
+        missing_boundary_flag = True
+
+    missing_boundary_symbols = _sample_symbols(
+        missing_boundary_evidence or boundary_sale_evidence
+    )
+    cross_account_symbols = _sample_symbols(cross_account_evidence)
+    options_symbols = _sample_symbols(options_evidence)
+    lot_mismatch_symbols = _sample_symbols(lot_mismatch_evidence)
+
     corporate_action_evidence = []
     for row in detail_rows:
         description = _normalize_text(row.get("description") or row.get("symbol"))
@@ -650,14 +732,25 @@ def _build_checklist_rows(
         {
             "key": "missing_boundary_data",
             "title": "Missing boundary data?",
-            "flag": bool(missing_boundary_evidence),
-            "status": "YES" if missing_boundary_evidence else "NO",
+            "flag": missing_boundary_flag,
+            "status": "YES" if missing_boundary_flag else "NO",
             "reason": (
-                "Cross-year replacement links indicate Dec/Jan boundary sensitivity."
+                (
+                    f"Detected {len(missing_boundary_evidence)} cross-year replacement link(s)"
+                    f" across boundary sales (sample: {', '.join(missing_boundary_symbols) or 'n/a'})."
+                )
                 if missing_boundary_evidence
-                else "No cross-year replacement links detected in IRS wash matches."
+                else (
+                    "Boundary-period sales plus material broker-vs-IRS deltas suggest"
+                    " possible missing Y-1/Y+1 trade history."
+                    if missing_boundary_flag
+                    else "No boundary-data warning signals detected."
+                )
             ),
             "evidence": missing_boundary_evidence,
+            "signal_count": len(missing_boundary_evidence) or len(boundary_sale_evidence),
+            "sample_symbols": missing_boundary_symbols,
+            "links": ["mode_diffs.by_sale_date", "mode_diffs.by_trade"],
         },
         {
             "key": "cross_account_replacements_likely",
@@ -665,11 +758,17 @@ def _build_checklist_rows(
             "flag": bool(cross_account_evidence),
             "status": "YES" if cross_account_evidence else "NO",
             "reason": (
-                "IRS wash matches include replacement buys in different accounts."
+                (
+                    f"Found {len(cross_account_evidence)} cross-account replacement link(s)"
+                    f" (sample: {', '.join(cross_account_symbols) or 'n/a'})."
+                )
                 if cross_account_evidence
                 else "No cross-account replacement matches detected."
             ),
             "evidence": cross_account_evidence,
+            "signal_count": len(cross_account_evidence),
+            "sample_symbols": cross_account_symbols,
+            "links": ["mode_diffs.by_trade", "mode_diffs.by_symbol"],
         },
         {
             "key": "options_replacements_likely",
@@ -677,11 +776,17 @@ def _build_checklist_rows(
             "flag": bool(options_evidence),
             "status": "YES" if options_evidence else "NO",
             "reason": (
-                "IRS wash matches include option acquisitions as replacements."
+                (
+                    f"Found {len(options_evidence)} option replacement link(s)"
+                    f" (sample: {', '.join(options_symbols) or 'n/a'})."
+                )
                 if options_evidence
                 else "No option replacement matches detected."
             ),
             "evidence": options_evidence,
+            "signal_count": len(options_evidence),
+            "sample_symbols": options_symbols,
+            "links": ["mode_diffs.by_trade"],
         },
         {
             "key": "lot_method_mismatch",
@@ -689,11 +794,26 @@ def _build_checklist_rows(
             "flag": bool(lot_mismatch_evidence),
             "status": "YES" if lot_mismatch_evidence else "NO",
             "reason": (
-                "Per-trade gain deltas exist without wash deltas."
+                (
+                    f"Per-trade gain deltas exist without wash deltas"
+                    f" on {len(lot_mismatch_evidence)} row(s)"
+                    f" (sample: {', '.join(lot_mismatch_symbols) or 'n/a'})."
+                )
                 if lot_mismatch_evidence
-                else "All mode differences are explained by wash-sale adjustments."
+                else (
+                    "All mode differences are explained by wash-sale adjustments."
+                    + (
+                        f" Partial replacement patterns detected on {len(partial_replacement_evidence)}"
+                        " sale(s)."
+                        if partial_replacement_evidence
+                        else ""
+                    )
+                )
             ),
             "evidence": lot_mismatch_evidence,
+            "signal_count": len(lot_mismatch_evidence),
+            "sample_symbols": lot_mismatch_symbols,
+            "links": ["mode_diffs.by_trade"],
         },
         {
             "key": "corporate_actions_present",
@@ -701,11 +821,14 @@ def _build_checklist_rows(
             "flag": bool(corporate_action_evidence),
             "status": "YES" if corporate_action_evidence else "NO",
             "reason": (
-                "Corporate-action keywords detected in trade descriptions."
+                f"Corporate-action keywords detected in {len(corporate_action_evidence)} row(s)."
                 if corporate_action_evidence
                 else "No corporate-action keywords detected in disposition descriptions."
             ),
             "evidence": corporate_action_evidence,
+            "signal_count": len(corporate_action_evidence),
+            "sample_symbols": _sample_symbols(corporate_action_evidence, symbol_key="description"),
+            "links": ["mode_diffs.by_symbol", "mode_diffs.by_trade"],
         },
     ]
     return checklist

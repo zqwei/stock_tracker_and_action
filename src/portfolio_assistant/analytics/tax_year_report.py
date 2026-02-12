@@ -554,6 +554,15 @@ def generate_tax_year_report(
     st_total = 0.0
     lt_total = 0.0
     unknown_term_total = 0.0
+    st_total_broker = 0.0
+    lt_total_broker = 0.0
+    unknown_term_total_broker = 0.0
+    st_wash_broker = 0.0
+    lt_wash_broker = 0.0
+    unknown_term_wash_broker = 0.0
+    st_wash_irs = 0.0
+    lt_wash_irs = 0.0
+    unknown_term_wash_irs = 0.0
 
     for record in records:
         raw_gain_loss = float(record.pnl)
@@ -603,10 +612,19 @@ def generate_tax_year_report(
 
         if holding_term == "SHORT":
             st_total += adjusted_gain_loss
+            st_total_broker += broker_gain_loss
+            st_wash_broker += wash_broker
+            st_wash_irs += wash_irs
         elif holding_term == "LONG":
             lt_total += adjusted_gain_loss
+            lt_total_broker += broker_gain_loss
+            lt_wash_broker += wash_broker
+            lt_wash_irs += wash_irs
         else:
             unknown_term_total += adjusted_gain_loss
+            unknown_term_total_broker += broker_gain_loss
+            unknown_term_wash_broker += wash_broker
+            unknown_term_wash_irs += wash_irs
 
     year_end_snapshot = year_end_lot_snapshot(
         session,
@@ -635,9 +653,18 @@ def generate_tax_year_report(
         "short_term_gain_or_loss": st_total,
         "long_term_gain_or_loss": lt_total,
         "unknown_term_gain_or_loss": unknown_term_total,
+        "short_term_gain_or_loss_broker": st_total_broker,
+        "long_term_gain_or_loss_broker": lt_total_broker,
+        "unknown_term_gain_or_loss_broker": unknown_term_total_broker,
         "total_wash_sale_disallowed": total_wash_irs,
         "total_wash_sale_disallowed_broker": total_wash_broker,
         "total_wash_sale_disallowed_irs": total_wash_irs,
+        "short_term_wash_sale_disallowed_broker": st_wash_broker,
+        "long_term_wash_sale_disallowed_broker": lt_wash_broker,
+        "unknown_term_wash_sale_disallowed_broker": unknown_term_wash_broker,
+        "short_term_wash_sale_disallowed_irs": st_wash_irs,
+        "long_term_wash_sale_disallowed_irs": lt_wash_irs,
+        "unknown_term_wash_sale_disallowed_irs": unknown_term_wash_irs,
         "wash_sale_mode_difference": total_wash_irs - total_wash_broker,
         "wash_sale_mode_gain_difference": total_adjusted_gain_loss - total_broker_gain_loss,
         "year_end_open_lot_count": len(year_end_snapshot),
@@ -655,6 +682,23 @@ def generate_tax_year_report(
         <= 1e-6,
         "math_check_wash_irs": abs(
             total_wash_irs - float(irs_wash["total_disallowed_loss"])
+        )
+        <= 1e-6,
+        "math_check_term_split_irs": abs(
+            (st_total + lt_total + unknown_term_total) - total_adjusted_gain_loss
+        )
+        <= 1e-6,
+        "math_check_term_split_broker": abs(
+            (st_total_broker + lt_total_broker + unknown_term_total_broker)
+            - total_broker_gain_loss
+        )
+        <= 1e-6,
+        "math_check_wash_term_split_broker": abs(
+            (st_wash_broker + lt_wash_broker + unknown_term_wash_broker) - total_wash_broker
+        )
+        <= 1e-6,
+        "math_check_wash_term_split_irs": abs(
+            (st_wash_irs + lt_wash_irs + unknown_term_wash_irs) - total_wash_irs
         )
         <= 1e-6,
     }
