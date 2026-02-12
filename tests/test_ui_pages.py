@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 import pandas as pd
+import pytest
 
 from portfolio_assistant.analytics.pnl_engine import recompute_pnl
 from portfolio_assistant.analytics.reconciliation import compare_totals, tax_report_totals
@@ -36,6 +37,56 @@ from portfolio_assistant.ui.streamlit.views.tax_year import (
     tax_year_summary_dataframe,
     wash_sale_matches_dataframe,
 )
+
+
+def test_render_readiness_panel_shows_pending_state(monkeypatch):
+    from portfolio_assistant.ui.streamlit import app as streamlit_app
+
+    progress_calls: list[float] = []
+    caption_calls: list[str] = []
+    success_calls: list[str] = []
+    info_calls: list[str] = []
+
+    monkeypatch.setattr(streamlit_app.st, "progress", lambda value: progress_calls.append(value))
+    monkeypatch.setattr(streamlit_app.st, "caption", lambda value: caption_calls.append(str(value)))
+    monkeypatch.setattr(streamlit_app.st, "success", lambda value: success_calls.append(str(value)))
+    monkeypatch.setattr(streamlit_app.st, "info", lambda value: info_calls.append(str(value)))
+
+    streamlit_app._render_readiness_panel(
+        steps=[("CSV uploaded", True), ("Required mappings complete", False)],
+        ready_label="ready",
+        pending_label="pending",
+    )
+
+    assert progress_calls == [pytest.approx(0.5)]
+    assert "Readiness 1/2 (50%)." in caption_calls
+    assert "[done] CSV uploaded" in caption_calls
+    assert "[pending] Required mappings complete" in caption_calls
+    assert success_calls == []
+    assert info_calls == ["pending"]
+
+
+def test_render_readiness_panel_shows_ready_state(monkeypatch):
+    from portfolio_assistant.ui.streamlit import app as streamlit_app
+
+    progress_calls: list[float] = []
+    success_calls: list[str] = []
+    info_calls: list[str] = []
+
+    monkeypatch.setattr(streamlit_app.st, "progress", lambda value: progress_calls.append(value))
+    monkeypatch.setattr(streamlit_app.st, "caption", lambda _value: None)
+    monkeypatch.setattr(streamlit_app.st, "success", lambda value: success_calls.append(str(value)))
+    monkeypatch.setattr(streamlit_app.st, "info", lambda value: info_calls.append(str(value)))
+
+    streamlit_app._render_readiness_panel(
+        steps=[("CSV uploaded", True), ("Required mappings complete", True)],
+        ready_label="ready",
+        pending_label="pending",
+    )
+
+    assert progress_calls == [pytest.approx(1.0)]
+    assert success_calls == ["ready"]
+    assert info_calls == []
 
 
 def _add_open_trade(session, account_id: str, symbol: str) -> None:

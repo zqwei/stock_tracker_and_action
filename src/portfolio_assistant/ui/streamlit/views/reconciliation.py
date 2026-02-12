@@ -285,6 +285,31 @@ def checklist_dataframe(
     return pd.DataFrame(rows)
 
 
+def _render_reconciliation_readiness(
+    *,
+    app_row_count: int,
+    broker_input_mode: str,
+    broker_input_ready: bool,
+) -> None:
+    steps = [("App tax-year detail rows available", app_row_count > 0)]
+    if broker_input_mode == "Manual totals":
+        steps.append(("Manual broker totals reviewed", broker_input_ready))
+    else:
+        steps.append(("Broker CSV uploaded and normalized", broker_input_ready))
+
+    completed_steps = sum(1 for _, done in steps if done)
+    total_steps = max(len(steps), 1)
+    readiness_ratio = completed_steps / float(total_steps)
+    st.progress(readiness_ratio)
+    st.caption(
+        f"Reconciliation readiness {completed_steps}/{total_steps} "
+        f"({int(readiness_ratio * 100)}%)."
+    )
+    for step_label, done in steps:
+        state = "done" if done else "pending"
+        st.caption(f"[{state}] {step_label}")
+
+
 def render_page() -> None:
     st.set_page_config(page_title="Reconciliation", layout="wide")
     apply_page_theme()
@@ -331,6 +356,7 @@ def render_page() -> None:
 
     broker_detail_frame = pd.DataFrame(columns=list(BROKER_CANONICAL_FIELDS))
     broker_totals = _default_broker_totals()
+    broker_input_ready = broker_input_mode == "Manual totals"
 
     if broker_input_mode == "Manual totals":
         cols = st.columns(3)
@@ -344,6 +370,10 @@ def render_page() -> None:
                 key=f"manual_{field}",
             )
         broker_totals = {field: float(manual_totals[field]) for field in NUMERIC_FIELDS}
+        st.caption(
+            "Manual mode compares summary totals only. Enter broker annual totals; "
+            "default 0.00 values will typically produce larger deltas."
+        )
     else:
         upload = st.file_uploader(
             "Upload broker realized gain/loss CSV",
@@ -351,7 +381,10 @@ def render_page() -> None:
             key="recon_broker_csv_uploader",
         )
         if upload is None:
-            st.info("Upload a broker CSV to compute broker totals and diff drilldowns.")
+            st.info(
+                "Upload a broker CSV to compute broker totals, enable diff drilldowns, "
+                "and complete reconciliation."
+            )
         else:
             raw_broker_frame = pd.read_csv(upload)
             st.dataframe(raw_broker_frame.head(30), use_container_width=True, hide_index=True)
@@ -375,7 +408,14 @@ def render_page() -> None:
 
             broker_detail_frame = normalize_broker_dataframe(raw_broker_frame, mapping)
             broker_totals = tax_report_totals(broker_detail_frame.to_dict(orient="records"))
+            broker_input_ready = True
             st.caption(f"Broker rows after normalization: {len(broker_detail_frame)}")
+
+    _render_reconciliation_readiness(
+        app_row_count=len(app_detail_frame),
+        broker_input_mode=broker_input_mode,
+        broker_input_ready=broker_input_ready,
+    )
 
     comparison = compare_totals(app_totals, broker_totals)
     comparison_frame = comparison_dataframe(comparison)
@@ -424,13 +464,26 @@ def render_page() -> None:
         "Gain/Loss Delta",
         money(float(comparison.get("total_gain_or_loss", {}).get("delta", 0.0) or 0.0)),
     )
-    c4.metric("Metrics with Delta", int(health["mismatch_metrics"]))
+    c4.metric("Metrics Outside Tolerance", int(health["mismatch_metrics"]))
     c5.metric("Max Absolute Delta", money(float(health["max_abs_delta"])))
 
-    if bool(health["in_sync"]):
+    if app_detail_frame.empty:
+        st.info(
+            "No app realized rows found for this tax year and account scope yet. "
+            "Import trades first to run a meaningful reconciliation."
+        )
+
+    if not broker_input_ready and broker_input_mode == "Upload broker CSV":
+        st.info("Next step: upload broker CSV rows to run reconciliation status checks.")
+    elif bool(health["in_sync"]):
         st.success("App and broker totals are aligned within tolerance.")
+        st.caption("Next step: export the reconciliation packet for your records.")
     else:
         st.warning("Differences detected. Use Diff Drilldowns and Checklist to reconcile.")
+        st.caption(
+            "Next step: review symbol/date/term deltas, then resolve checklist flags "
+            "before exporting."
+        )
 
     st.download_button(
         label="Download reconciliation packet (.zip)",
@@ -440,6 +493,8 @@ def render_page() -> None:
         key="download_reconciliation_packet_zip",
         use_container_width=True,
     )
+    if not broker_input_ready and broker_input_mode == "Upload broker CSV":
+        st.caption("Packet currently includes app totals with zeroed broker placeholders.")
 
     tab_totals, tab_diffs, tab_checklist = st.tabs(
         ["Totals Comparison", "Diff Drilldowns", "Checklist"]
@@ -480,7 +535,12 @@ def render_page() -> None:
             )
 
     with tab_diffs:
-        if broker_detail_frame.empty:
+        if broker_input_mode == "Manual totals":
+            st.info(
+                "Diff drilldowns require row-level broker CSV data. Switch to "
+                "'Upload broker CSV' for symbol/date/term analysis."
+            )
+        elif broker_detail_frame.empty:
             st.info("Upload broker CSV rows to enable symbol/date/term drilldowns.")
         else:
             st.markdown("**Diff by symbol**")
