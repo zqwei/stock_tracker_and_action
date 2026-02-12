@@ -604,7 +604,6 @@ def _resolve_theme_key(theme_key: str | None = None) -> str:
     current = str(st.session_state.get(UI_THEME_SESSION_KEY, DEFAULT_THEME_PRESET)).strip().lower()
     if current not in THEME_PRESETS:
         current = DEFAULT_THEME_PRESET
-    st.session_state[UI_THEME_SESSION_KEY] = current
     return current
 
 
@@ -622,11 +621,13 @@ def _theme_specific_css(theme_key: str) -> str:
 def render_theme_selector() -> str:
     options = list(THEME_PRESETS.keys())
     current = _resolve_theme_key()
-    default_index = options.index(current)
-    selected = st.selectbox(
+    if str(st.session_state.get(UI_THEME_SESSION_KEY, "")).strip().lower() not in THEME_PRESETS:
+        st.session_state[UI_THEME_SESSION_KEY] = current
+
+    selected = st.radio(
         "Color theme",
         options=options,
-        index=default_index,
+        horizontal=True,
         format_func=lambda key: THEME_LABELS.get(key, key.replace("_", " ").title()),
         key=UI_THEME_SESSION_KEY,
         help="Switch between bright, dark, deep dark, and palenight presets.",
