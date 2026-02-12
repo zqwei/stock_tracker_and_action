@@ -13,7 +13,18 @@ from portfolio_assistant.assistant.tools_db import (
     insert_cash_activity,
     insert_trade_import,
 )
-from portfolio_assistant.db.models import Account, Base, CashActivity, TradeNormalized, TradeRaw
+from portfolio_assistant.db.models import (
+    Account,
+    Base,
+    CashActivity,
+    PnlRealized,
+    PositionOpen,
+    ReconciliationArtifact,
+    ReconciliationRun,
+    TradeNormalized,
+    TradeRaw,
+    WashSaleAdjustment,
+)
 from portfolio_assistant.ingest.csv_import import normalize_cash_records, normalize_trade_records
 from portfolio_assistant.ingest.csv_mapping import (
     get_saved_trade_mapping,
@@ -1003,6 +1014,7 @@ def test_delete_account_if_empty_removes_account_without_dependencies():
 
         assert ok is True
         assert "Removed account" in message
+        assert "trade imports=0" in message
         assert session.get(Account, account_id) is None
 
 
@@ -1041,4 +1053,169 @@ def test_delete_account_if_empty_blocks_when_trade_data_exists():
 
         assert ok is False
         assert "Cannot remove account" in message
+        assert "force=True" in message
         assert "normalized trades" in message
+
+
+def test_delete_account_if_empty_force_deletes_dependencies_transactionally():
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        account = _setup_account(session)
+
+        trade_1 = TradeNormalized(
+            account_id=account.id,
+            broker="B1",
+            trade_id="T-1",
+            executed_at=datetime(2025, 1, 2, 10, 0, 0),
+            instrument_type="STOCK",
+            symbol="AAPL",
+            side="BUY",
+            option_symbol_raw=None,
+            underlying=None,
+            expiration=None,
+            strike=None,
+            call_put=None,
+            multiplier=1,
+            quantity=1.0,
+            price=100.0,
+            fees=0.0,
+            net_amount=-100.0,
+            currency="USD",
+        )
+        trade_2 = TradeNormalized(
+            account_id=account.id,
+            broker="B1",
+            trade_id="T-2",
+            executed_at=datetime(2025, 1, 3, 10, 0, 0),
+            instrument_type="STOCK",
+            symbol="AAPL",
+            side="SELL",
+            option_symbol_raw=None,
+            underlying=None,
+            expiration=None,
+            strike=None,
+            call_put=None,
+            multiplier=1,
+            quantity=1.0,
+            price=110.0,
+            fees=0.0,
+            net_amount=110.0,
+            currency="USD",
+        )
+        session.add_all([trade_1, trade_2])
+        session.flush()
+
+        session.add(
+            TradeRaw(
+                account_id=account.id,
+                broker="B1",
+                source_file="trades.csv",
+                file_signature="sig-a",
+                row_index=0,
+                row_hash="hash-a",
+                raw_payload={"Date": "2025-01-02"},
+                mapping_name="m1",
+            )
+        )
+        session.add(
+            CashActivity(
+                account_id=account.id,
+                broker="B1",
+                posted_at=datetime(2025, 1, 5, 12, 0, 0),
+                activity_type="DEPOSIT",
+                amount=500.0,
+                description="ACH deposit",
+                source="ACH",
+                is_external=True,
+            )
+        )
+        realized = PnlRealized(
+            account_id=account.id,
+            symbol="AAPL",
+            instrument_type="STOCK",
+            close_date=datetime(2025, 1, 3).date(),
+            quantity=1.0,
+            proceeds=110.0,
+            cost_basis=100.0,
+            fees=0.0,
+            pnl=10.0,
+            notes="test",
+        )
+        position = PositionOpen(
+            account_id=account.id,
+            instrument_type="STOCK",
+            symbol="AAPL",
+            option_symbol_raw=None,
+            quantity=1.0,
+            avg_cost=100.0,
+            last_price=110.0,
+            market_value=110.0,
+            unrealized_pnl=10.0,
+            as_of=datetime(2025, 1, 6, 12, 0, 0),
+        )
+        run = ReconciliationRun(
+            tax_year=2025,
+            account_id=account.id,
+            broker="B1",
+            scope_label="single",
+            broker_input_kind="csv",
+            status="DRAFT",
+        )
+        session.add_all([realized, position, run])
+        session.flush()
+
+        session.add(
+            ReconciliationArtifact(
+                reconciliation_run_id=run.id,
+                tax_year=2025,
+                artifact_type="APP_SUMMARY",
+                artifact_name="summary",
+                storage_format="json",
+                payload_json={"ok": True},
+            )
+        )
+        session.add(
+            WashSaleAdjustment(
+                mode="IRS",
+                tax_year=2025,
+                reconciliation_run_id=run.id,
+                loss_sale_row_id=realized.id,
+                loss_trade_row_id=trade_1.id,
+                replacement_trade_row_id=trade_2.id,
+                replacement_account_id=account.id,
+                sale_symbol="AAPL",
+                sale_date=datetime(2025, 1, 3).date(),
+                replacement_executed_at=datetime(2025, 1, 4, 9, 0, 0),
+                window_offset_days=1,
+                replacement_quantity_equiv=1.0,
+                disallowed_loss=10.0,
+                basis_adjustment=10.0,
+                permanently_disallowed=False,
+                adjustment_sequence=0,
+                status="APPLIED",
+            )
+        )
+        session.flush()
+
+        ok, message = delete_account_if_empty(session, account.id, force=True)
+        session.commit()
+
+        assert ok is True
+        assert message == (
+            f"Force removed account '{account.broker} | {account.account_label}'. "
+            "Deleted dependencies: trade imports=1, normalized trades=2, cash rows=1, "
+            "realized rows=1, open positions=1, reconciliation artifacts=1, "
+            "reconciliation runs=1, wash-sale matches=1."
+        )
+
+        assert session.scalar(select(func.count()).select_from(TradeRaw)) == 0
+        assert session.scalar(select(func.count()).select_from(TradeNormalized)) == 0
+        assert session.scalar(select(func.count()).select_from(CashActivity)) == 0
+        assert session.scalar(select(func.count()).select_from(PnlRealized)) == 0
+        assert session.scalar(select(func.count()).select_from(PositionOpen)) == 0
+        assert session.scalar(select(func.count()).select_from(ReconciliationArtifact)) == 0
+        assert session.scalar(select(func.count()).select_from(ReconciliationRun)) == 0
+        assert session.scalar(select(func.count()).select_from(WashSaleAdjustment)) == 0
+        assert session.get(Account, account.id) is None
