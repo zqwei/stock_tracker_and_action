@@ -882,6 +882,115 @@ def test_insert_cash_activity_large_batches_handle_reimport_and_partial_conflict
         assert session.scalar(select(func.count()).select_from(CashActivity)) == 9000
 
 
+def test_insert_trade_import_duplicate_heavy_batch_reports_perf_stats():
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        account = _setup_account(session)
+        raw_rows: list[dict] = []
+        normalized_rows: list[dict] = []
+        unique_trade_keys = 40
+        repeats_per_key = 60
+
+        for unique_idx in range(unique_trade_keys):
+            executed_at = datetime(2025, 1, 1, 9, 30, 0) + timedelta(minutes=unique_idx)
+            raw_payload = {
+                "Date": executed_at.isoformat(),
+                "Type": "STOCK",
+                "Side": "BUY",
+                "Qty": "1",
+                "Price": "10",
+                "Symbol": f"SYM{unique_idx:02d}",
+            }
+            normalized_payload = {
+                "account_id": account.id,
+                "broker": "B1",
+                "trade_id": f"T-{unique_idx}",
+                "executed_at": executed_at,
+                "instrument_type": "STOCK",
+                "symbol": "AAPL",
+                "side": "BUY",
+                "option_symbol_raw": None,
+                "underlying": None,
+                "expiration": None,
+                "strike": None,
+                "call_put": None,
+                "multiplier": 1,
+                "quantity": 1.0,
+                "price": 10.0,
+                "fees": 0.0,
+                "net_amount": -10.0,
+                "currency": "USD",
+            }
+            raw_rows.extend([raw_payload] * repeats_per_key)
+            normalized_rows.extend([normalized_payload] * repeats_per_key)
+
+        perf_stats: dict[str, float | int] = {}
+        inserted = insert_trade_import(
+            session=session,
+            account_id=account.id,
+            broker="B1",
+            source_file="dup-heavy.csv",
+            file_sig="sig-dup-heavy",
+            mapping_name="m1",
+            raw_rows=raw_rows,
+            normalized_rows=normalized_rows,
+            perf_stats=perf_stats,
+        )
+
+        assert inserted == (unique_trade_keys, unique_trade_keys)
+        assert session.scalar(select(func.count()).select_from(TradeRaw)) == unique_trade_keys
+        assert session.scalar(select(func.count()).select_from(TradeNormalized)) == unique_trade_keys
+
+        expected_input = unique_trade_keys * repeats_per_key
+        assert perf_stats["input_raw_rows"] == expected_input
+        assert perf_stats["input_normalized_rows"] == expected_input
+        assert perf_stats["prepared_raw_rows"] == unique_trade_keys
+        assert perf_stats["prepared_normalized_rows"] == unique_trade_keys
+        assert perf_stats["inserted_raw_rows"] == unique_trade_keys
+        assert perf_stats["inserted_normalized_rows"] == unique_trade_keys
+        assert float(perf_stats["total_seconds"]) >= float(perf_stats["insert_seconds"]) >= 0.0
+        assert float(perf_stats["dedupe_seconds"]) >= 0.0
+
+
+def test_insert_cash_activity_duplicate_heavy_batch_reports_perf_stats():
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        account = _setup_account(session)
+        rows: list[dict] = []
+        unique_rows = 35
+        repeats_per_row = 80
+        for unique_idx in range(unique_rows):
+            posted_at = datetime(2025, 1, 5, 12, 0, 0) + timedelta(minutes=unique_idx)
+            payload = {
+                "account_id": account.id,
+                "broker": "B1",
+                "posted_at": posted_at,
+                "activity_type": "DEPOSIT",
+                "amount": 100.0,
+                "description": f"ACH deposit {unique_idx}",
+                "source": "ACH",
+                "is_external": True,
+            }
+            rows.extend([payload] * repeats_per_row)
+
+        perf_stats: dict[str, float | int] = {}
+        inserted = insert_cash_activity(session, rows, perf_stats=perf_stats)
+
+        assert inserted == unique_rows
+        assert session.scalar(select(func.count()).select_from(CashActivity)) == unique_rows
+
+        expected_input = unique_rows * repeats_per_row
+        assert perf_stats["input_rows"] == expected_input
+        assert perf_stats["prepared_rows"] == unique_rows
+        assert perf_stats["inserted_rows"] == unique_rows
+        assert float(perf_stats["total_seconds"]) >= float(perf_stats["insert_seconds"]) >= 0.0
+        assert float(perf_stats["dedupe_seconds"]) >= 0.0
+
+
 def test_delete_account_if_empty_removes_account_without_dependencies():
     engine = create_engine("sqlite:///:memory:", future=True)
     Base.metadata.create_all(engine)

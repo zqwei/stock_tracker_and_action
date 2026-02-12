@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from contextlib import contextmanager
+from time import perf_counter
 
 from sqlalchemy import case, delete, func, insert, select, text
 from sqlalchemy.engine import Engine
@@ -250,9 +251,16 @@ def insert_trade_import(
     mapping_name: str,
     raw_rows: Iterable[dict],
     normalized_rows: Iterable[dict],
+    *,
+    perf_stats: dict[str, float | int] | None = None,
 ) -> tuple[int, int]:
+    total_started = perf_counter() if perf_stats is not None else 0.0
+    prepare_started = perf_counter() if perf_stats is not None else 0.0
+
     prepared_raw_rows: list[dict] = []
+    input_raw_rows = 0
     for idx, payload in enumerate(raw_rows):
+        input_raw_rows += 1
         payload_dict = payload if isinstance(payload, dict) else {"raw": payload}
         prepared_raw_rows.append(
             {
@@ -268,10 +276,15 @@ def insert_trade_import(
         )
 
     prepared_normalized_rows: list[dict] = []
+    input_normalized_rows = 0
     for row in normalized_rows:
+        input_normalized_rows += 1
         normalized = dict(row)
         normalized["dedupe_key"] = normalized.get("dedupe_key") or trade_dedupe_key(normalized)
         prepared_normalized_rows.append(normalized)
+
+    prepare_seconds = (perf_counter() - prepare_started) if perf_stats is not None else 0.0
+    dedupe_started = perf_counter() if perf_stats is not None else 0.0
 
     prepared_raw_rows = _dedupe_batch_rows_by_key(
         prepared_raw_rows,
@@ -281,6 +294,9 @@ def insert_trade_import(
         prepared_normalized_rows,
         key_field="dedupe_key",
     )
+
+    dedupe_seconds = (perf_counter() - dedupe_started) if perf_stats is not None else 0.0
+    insert_started = perf_counter() if perf_stats is not None else 0.0
 
     raw_count = _bulk_insert_ignore_conflicts(
         session,
@@ -296,27 +312,78 @@ def insert_trade_import(
         conflict_fields=("account_id", "dedupe_key"),
         key_field="dedupe_key",
     )
+
+    if perf_stats is not None:
+        insert_seconds = perf_counter() - insert_started
+        total_seconds = perf_counter() - total_started
+        perf_stats.update(
+            {
+                "input_raw_rows": input_raw_rows,
+                "input_normalized_rows": input_normalized_rows,
+                "prepared_raw_rows": len(prepared_raw_rows),
+                "prepared_normalized_rows": len(prepared_normalized_rows),
+                "inserted_raw_rows": raw_count,
+                "inserted_normalized_rows": normalized_count,
+                "prepare_seconds": round(prepare_seconds, 6),
+                "dedupe_seconds": round(dedupe_seconds, 6),
+                "insert_seconds": round(insert_seconds, 6),
+                "total_seconds": round(total_seconds, 6),
+            }
+        )
     return raw_count, normalized_count
 
 
-def insert_cash_activity(session: Session, rows: Iterable[dict]) -> int:
+def insert_cash_activity(
+    session: Session,
+    rows: Iterable[dict],
+    *,
+    perf_stats: dict[str, float | int] | None = None,
+) -> int:
+    total_started = perf_counter() if perf_stats is not None else 0.0
+    prepare_started = perf_counter() if perf_stats is not None else 0.0
+
     prepared_rows: list[dict] = []
+    input_rows = 0
     for row in rows:
+        input_rows += 1
         payload = dict(row)
         payload["dedupe_key"] = payload.get("dedupe_key") or cash_dedupe_key(payload)
         prepared_rows.append(payload)
+
+    prepare_seconds = (perf_counter() - prepare_started) if perf_stats is not None else 0.0
+    dedupe_started = perf_counter() if perf_stats is not None else 0.0
 
     prepared_rows = _dedupe_batch_rows_by_key(
         prepared_rows,
         key_field="dedupe_key",
     )
-    return _bulk_insert_ignore_conflicts(
+
+    dedupe_seconds = (perf_counter() - dedupe_started) if perf_stats is not None else 0.0
+    insert_started = perf_counter() if perf_stats is not None else 0.0
+
+    inserted = _bulk_insert_ignore_conflicts(
         session,
         CashActivity,
         prepared_rows,
         conflict_fields=("account_id", "dedupe_key"),
         key_field="dedupe_key",
     )
+
+    if perf_stats is not None:
+        insert_seconds = perf_counter() - insert_started
+        total_seconds = perf_counter() - total_started
+        perf_stats.update(
+            {
+                "input_rows": input_rows,
+                "prepared_rows": len(prepared_rows),
+                "inserted_rows": inserted,
+                "prepare_seconds": round(prepare_seconds, 6),
+                "dedupe_seconds": round(dedupe_seconds, 6),
+                "insert_seconds": round(insert_seconds, 6),
+                "total_seconds": round(total_seconds, 6),
+            }
+        )
+    return inserted
 
 
 def clear_derived_tables(session: Session) -> None:
