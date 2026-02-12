@@ -8,6 +8,9 @@ This file defines post-Phase-1 add-ons that must remain isolated from core impor
   - `ENABLE_ASK_GPT=false` (default)
   - `ENABLE_DAILY_BRIEFING=false` (default)
   - `ENABLE_WEB_MODE=false` (default)
+- Daily briefing summarizer provider defaults to local-only:
+  - `SUMMARIZER_PROVIDER=none` (default)
+  - optional AI summaries require `SUMMARIZER_PROVIDER=openai`
 - If disabled, no GPT/web calls are made by the app.
 
 ## Ask GPT (read-only assistant)
