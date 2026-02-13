@@ -70,6 +70,26 @@ def _normalize_instrument_hint(value: object) -> str:
     return " ".join(tokens)
 
 
+def _classify_instrument_hint(instrument_hint: str) -> str | None:
+    if not instrument_hint:
+        return None
+    if instrument_hint in _OPTION_INSTRUMENT_HINTS:
+        return "OPTION"
+    if instrument_hint in _STOCK_INSTRUMENT_HINTS:
+        return "STOCK"
+
+    tokens = set(instrument_hint.split())
+    if any(token.startswith("OPTION") for token in tokens) or {"CALL", "PUT"}.intersection(tokens):
+        return "OPTION"
+    if (
+        any(token.startswith("STOCK") for token in tokens)
+        or any(token.startswith("EQUIT") for token in tokens)
+        or {"ETF", "SHARE", "SHARES"}.intersection(tokens)
+    ):
+        return "STOCK"
+    return None
+
+
 def make_import_issue(message: str, *, severity: ImportIssueSeverity = "WARNING") -> str:
     severity_text = severity.upper()
     if severity_text not in _IMPORT_ISSUE_SEVERITIES:
@@ -206,16 +226,36 @@ def normalize_trade_records(
         parsed_option = parse_option_symbol(option_symbol_candidate)
         instrument_value = row_data.get("instrument_type")
         instrument_hint = _normalize_instrument_hint(instrument_value)
+        quantity = parse_float(row_data.get("quantity"), default=0.0) or 0.0
+        quantity = abs(quantity)
 
-        if instrument_hint in _OPTION_INSTRUMENT_HINTS:
-            instrument_value = "OPTION"
-        elif instrument_hint in _STOCK_INSTRUMENT_HINTS:
-            instrument_value = "STOCK"
-        elif default_instrument and (
-            instrument_hint in _UNKNOWN_INSTRUMENT_HINTS
-            or instrument_hint not in (_OPTION_INSTRUMENT_HINTS | _STOCK_INSTRUMENT_HINTS)
-        ):
+        if quantity <= 0:
+            issues.append(
+                make_import_issue(
+                    f"Row {row_number}: skipped non-filled row (quantity <= 0)",
+                    severity="INFO",
+                )
+            )
+            continue
+
+        classified_instrument = _classify_instrument_hint(instrument_hint)
+        if classified_instrument:
+            instrument_value = classified_instrument
+        elif default_instrument:
             instrument_value = default_instrument
+        else:
+            instrument_value = None
+
+        # Contract for UI/consumers: when instrument type is neither mapped nor inferable,
+        # rows are skipped with a warning so the user can choose an explicit Stock/Option default.
+        if not instrument_value and side not in {"BTO", "STO", "BTC", "STC"} and not parsed_option:
+            issues.append(
+                make_import_issue(
+                    f"Row {row_number}: instrument type is missing or ambiguous; choose Stock or Option as default.",
+                    severity="WARNING",
+                )
+            )
+            continue
 
         instrument_type = normalize_instrument_type(
             instrument_value,
@@ -225,17 +265,6 @@ def normalize_trade_records(
             instrument_type = "OPTION"
         if parsed_option and instrument_type != "OPTION":
             instrument_type = "OPTION"
-
-        quantity = parse_float(row_data.get("quantity"), default=0.0) or 0.0
-        quantity = abs(quantity)
-        if quantity <= 0:
-            issues.append(
-                make_import_issue(
-                    f"Row {row_number}: skipped non-filled row (quantity <= 0)",
-                    severity="INFO",
-                )
-            )
-            continue
 
         executed_at = parse_datetime(row_data.get("executed_at"))
         price = parse_float(row_data.get("price"), default=0.0) or 0.0
