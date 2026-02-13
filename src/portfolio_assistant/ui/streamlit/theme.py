@@ -132,6 +132,7 @@ __ROOT_VARS__
 [data-testid="stAppViewContainer"] > .main .block-container {
   padding-top: 1.2rem;
   padding-bottom: 2rem;
+  max-width: 1240px;
 }
 
 [data-testid="stHeader"] {
@@ -243,6 +244,10 @@ code, pre, kbd {
   color: var(--pa-text);
   font-weight: 600;
   margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.42rem;
+  line-height: 1.25;
 }
 
 [data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) > div:last-child {

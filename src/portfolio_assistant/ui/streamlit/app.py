@@ -95,6 +95,32 @@ CORE_NAV_ITEMS = [
     "Data Quality",
 ]
 
+NAV_ICON_BY_ITEM = {
+    "Accounts": "🏦",
+    "Import Trades": "📥",
+    "Import Cash": "💵",
+    "Overview": "🧭",
+    "Benchmarks": "📈",
+    "Calendar": "🗓️",
+    "Wash Sale Risk": "⚠️",
+    "Data Quality": "🧪",
+    "Ask GPT": "🤖",
+    "Daily Briefings": "📰",
+}
+
+NAV_CONTENT_HINTS = {
+    "Accounts": "Create or manage brokerage accounts before importing data.",
+    "Import Trades": "Normalize executions and verify instrument mapping before import.",
+    "Import Cash": "Map and tag deposits/withdrawals for contribution tracking.",
+    "Overview": "Review consolidated P&L, contributions, and position snapshot.",
+    "Benchmarks": "Compare portfolio returns against benchmark windows.",
+    "Calendar": "Inspect realized P&L over time for volatility and event context.",
+    "Wash Sale Risk": "Review informational cross-account replacement risk flags.",
+    "Data Quality": "Audit import completeness and normalization health.",
+    "Ask GPT": "Generate scoped portfolio Q&A grounded in your local data.",
+    "Daily Briefings": "Generate a concise daily summary with optional GPT narrative.",
+}
+
 TRADE_MAPPING_HIDDEN_FIELDS = {"currency"}
 DELETE_ACCOUNT_CONFIRMATION_PHRASE = "DELETE ACCOUNT"
 
@@ -128,6 +154,15 @@ def _nav_items() -> list[str]:
     if settings.enable_daily_briefing:
         items.append("Daily Briefings")
     return items
+
+
+def _nav_display_label(nav_item: str) -> str:
+    icon = NAV_ICON_BY_ITEM.get(nav_item, "•")
+    return f"{icon} {nav_item}"
+
+
+def _nav_content_hint(nav_item: str) -> str:
+    return NAV_CONTENT_HINTS.get(nav_item, "Follow workflow guidance for this page.")
 
 
 @st.cache_resource
@@ -220,6 +255,27 @@ def _mapped_instrument_values_are_clear(
     return (clear / checked) >= 0.8
 
 
+def _instrument_type_decision_context(
+    *,
+    instrument_type_column: str | None,
+    instrument_values_clear: bool,
+) -> tuple[bool, str]:
+    if instrument_type_column is None:
+        return True, "No Instrument Type column is mapped for this file."
+    if not _is_likely_instrument_type_column_name(instrument_type_column):
+        return (
+            True,
+            "Instrument Type is mapped to a non-type-like column "
+            f"(`{instrument_type_column}`).",
+        )
+    if not instrument_values_clear:
+        return (
+            True,
+            "Mapped Instrument Type values appear unclear in sampled rows.",
+        )
+    return False, f"Instrument Type mapping looks reliable (`{instrument_type_column}`)."
+
+
 def _account_label(account: Account) -> str:
     return f"{account.broker} | {account.account_label} | {account.account_type.value}"
 
@@ -253,13 +309,14 @@ def _render_sidebar(accounts: list[Account], nav_items: list[str]) -> tuple[str,
     with st.sidebar:
         st.title("Portfolio Assistant")
         render_theme_selector()
-        st.caption("One workflow for imports, analytics, and risk checks.")
+        st.caption("Financial radar workflow for imports, analytics, and risk checks.")
         st.markdown("**Workflow Navigation**")
         nav = st.radio(
             "Workflow navigation",
             nav_items,
             key="nav_item",
             label_visibility="collapsed",
+            format_func=_nav_display_label,
         )
 
         account_filter_id = st.selectbox(
@@ -285,6 +342,8 @@ def _render_flow_header(
 ) -> None:
     idx = nav_items.index(nav)
     progress = float(idx + 1) / float(len(nav_items))
+    st.markdown(f"**{_nav_display_label(nav)}**")
+    st.caption(_nav_content_hint(nav))
     st.progress(progress)
 
     if account_filter_id is None:
@@ -749,43 +808,44 @@ def _render_import_trades(
             )
 
     default_instrument_type: str | None = None
+    default_choice = "Auto detect"
     instrument_type_column = current_mapping.get("instrument_type")
     instrument_values_clear = (
         _mapped_instrument_values_are_clear(df, instrument_type_column)
         if instrument_type_column
         else False
     )
-    show_default_type_picker = (
-        instrument_type_column is None
-        or not _is_likely_instrument_type_column_name(instrument_type_column)
-        or not instrument_values_clear
+    needs_type_decision, type_decision_message = _instrument_type_decision_context(
+        instrument_type_column=instrument_type_column,
+        instrument_values_clear=instrument_values_clear,
     )
-    if show_default_type_picker:
-        if instrument_type_column is None:
-            st.caption("No Instrument Type column mapped; choose a per-file default when needed.")
-        elif not _is_likely_instrument_type_column_name(instrument_type_column):
-            st.caption(
-                "Instrument Type is mapped to a non-type-like column "
-                f"(`{instrument_type_column}`). You can set a safe default below."
-            )
-        else:
-            st.caption(
-                "Mapped Instrument Type values appear unclear in this file. "
-                "Choose a safe default or keep Auto detect."
-            )
-        default_choice = st.selectbox(
-            "Default instrument type (when type values are missing or unclear)",
+    if needs_type_decision:
+        st.markdown("**Instrument Type Decision**")
+        st.info(type_decision_message)
+        default_choice = st.radio(
+            "How should missing or unclear instrument types be handled?",
             options=["Auto detect", "Stock", "Option"],
+            horizontal=True,
             help=(
                 "Use this when your CSV is stock-only or option-only and has no clean Instrument Type values. "
                 "Auto detect infers from OCC option symbols and option-style sides (BTO/STO/BTC/STC)."
             ),
             key=f"{mapping_key}_default_instrument_type",
         )
-        if default_choice == "Stock":
-            default_instrument_type = "STOCK"
-        elif default_choice == "Option":
-            default_instrument_type = "OPTION"
+        if default_choice == "Auto detect":
+            st.caption(
+                "Decision selected: Auto detect. Review normalized preview columns "
+                "`instrument_type` and `side` before importing."
+            )
+        else:
+            st.success(f"Decision selected: use `{default_choice.upper()}` for unclear rows.")
+    else:
+        st.success(type_decision_message)
+
+    if default_choice == "Stock":
+        default_instrument_type = "STOCK"
+    elif default_choice == "Option":
+        default_instrument_type = "OPTION"
 
     normalized_rows: list[dict] = []
     issues: list[str] = []
@@ -826,9 +886,15 @@ def _render_import_trades(
     c_skipped.metric("Skipped rows", skipped_count)
 
     can_import = not missing and valid_count > 0
+    type_decision_ready = not needs_type_decision or default_choice in {
+        "Auto detect",
+        "Stock",
+        "Option",
+    }
     readiness_steps = [
         ("Trade CSV uploaded", True),
         ("Required mappings complete", not missing),
+        ("Instrument-type decision reviewed", type_decision_ready),
         ("Normalized rows available", valid_count > 0),
     ]
     _render_readiness_panel(

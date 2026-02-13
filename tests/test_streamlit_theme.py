@@ -24,6 +24,8 @@ def test_apply_futuristic_theme_includes_bright_overrides(monkeypatch):
     assert "button:focus-visible" in css
     assert "[data-testid=\"stSidebar\"] [data-testid=\"stSidebarNav\"] a span" in css
     assert "[data-baseweb=\"tab\"] {" in css
+    assert "max-width: 1240px;" in css
+    assert "display: flex;" in css
     assert "#f6fbff !important" in css
     assert "[data-testid=\"stAlertContainer\"]:has([data-testid=\"stAlertContentWarning\"])" in css
 
@@ -50,6 +52,7 @@ def test_apply_futuristic_theme_deep_dark_excludes_bright_only_rules(monkeypatch
     assert "--pa-button_border: #434b57;" in css
     assert "button:focus-visible" in css
     assert "[data-baseweb=\"tab\"] {" in css
+    assert "max-width: 1240px;" in css
     assert "#f6fbff !important" not in css
     assert "[data-testid=\"stAlertContainer\"]:has([data-testid=\"stAlertContentWarning\"])" not in css
 

@@ -39,6 +39,48 @@ from portfolio_assistant.ui.streamlit.views.tax_year import (
 )
 
 
+def test_nav_display_label_prefers_icon_mapping():
+    from portfolio_assistant.ui.streamlit import app as streamlit_app
+
+    label = streamlit_app._nav_display_label("Import Trades")
+    assert label.startswith("📥 ")
+    assert label.endswith("Import Trades")
+
+    fallback = streamlit_app._nav_display_label("Unknown")
+    assert fallback == "• Unknown"
+
+
+def test_instrument_type_decision_context_variants():
+    from portfolio_assistant.ui.streamlit import app as streamlit_app
+
+    missing = streamlit_app._instrument_type_decision_context(
+        instrument_type_column=None,
+        instrument_values_clear=False,
+    )
+    assert missing[0] is True
+    assert "No Instrument Type column is mapped" in missing[1]
+
+    unclear_values = streamlit_app._instrument_type_decision_context(
+        instrument_type_column="Instrument Type",
+        instrument_values_clear=False,
+    )
+    assert unclear_values[0] is True
+    assert "appear unclear" in unclear_values[1]
+
+    non_type_like = streamlit_app._instrument_type_decision_context(
+        instrument_type_column="status",
+        instrument_values_clear=True,
+    )
+    assert non_type_like[0] is True
+    assert "non-type-like column" in non_type_like[1]
+
+    reliable = streamlit_app._instrument_type_decision_context(
+        instrument_type_column="Asset Type",
+        instrument_values_clear=True,
+    )
+    assert reliable == (False, "Instrument Type mapping looks reliable (`Asset Type`).")
+
+
 def test_delete_confirmation_ready_requires_checkbox_and_phrase():
     from portfolio_assistant.ui.streamlit import app as streamlit_app
 
