@@ -216,7 +216,10 @@ def infer_column_map(columns: list[str], broker: str = "generic") -> dict[str, s
 TRADE_FIELD_HELP: dict[str, str] = {
     "trade_id": "Optional broker order/trade id used for traceability and de-dupe.",
     "executed_at": "Trade Date / Filled Time. Prefer execution/fill time over order submission time.",
-    "instrument_type": "Stock or Option. Optional if the file is single-type or options can be inferred.",
+    "instrument_type": (
+        "Stock or Option. If this is missing/unclear, choose an explicit per-file default "
+        "(Stock or Option) unless options can be inferred from OCC symbols or BTO/STO/BTC/STC sides."
+    ),
     "symbol": "Ticker or underlying symbol.",
     "side": "Buy/Sell for stock. Option files can also use BTO/STO/BTC/STC.",
     "quantity": "Filled quantity/contracts (not total order quantity when partially filled).",
@@ -257,8 +260,13 @@ def trade_mapping_hints(columns: list[str], broker: str = "generic") -> list[str
             hints.append("Rows with cancelled/rejected status often have zero filled qty and will be skipped.")
         if "type" not in normalized and "symbol" in normalized:
             hints.append(
-                "No explicit `Type` detected: use default instrument type in UI or infer options from OCC symbols."
+                "No explicit `Type` detected: choose Stock or Option default for ambiguous rows; OCC symbols/sides still auto-infer options."
             )
+
+    if "type" not in normalized and "instrument type" not in normalized:
+        hints.append(
+            "No clear Instrument Type column detected. Rows without option-side/OCC clues require choosing Stock or Option default."
+        )
 
     if "price" in normalized and "avg price" in normalized:
         hints.append("When both `Price` and `Avg Price` exist, average fill price is usually safer for P&L.")

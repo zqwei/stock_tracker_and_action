@@ -531,6 +531,40 @@ def test_normalize_trade_records_uses_default_instrument_type_when_missing_colum
     assert rows[0]["price"] == 25.50
 
 
+def test_normalize_trade_records_requires_explicit_default_when_instrument_type_is_ambiguous():
+    df = pd.DataFrame(
+        [
+            {
+                "Trade Date": "2025-01-05",
+                "Buy/Sell": "BUY",
+                "Quantity": "10",
+                "Unit Price": "25.50",
+                "Symbol": "AAPL",
+            }
+        ]
+    )
+    mapping = {
+        "executed_at": "Trade Date",
+        "side": "Buy/Sell",
+        "quantity": "Quantity",
+        "price": "Unit Price",
+        "symbol": "Symbol",
+    }
+
+    rows, issues = normalize_trade_records(
+        df=df,
+        mapping=mapping,
+        account_id="acc-1",
+        broker="generic",
+    )
+
+    assert rows == []
+    assert len(issues) == 1
+    severity, message = parse_import_issue(issues[0])
+    assert severity == "WARNING"
+    assert "instrument type is missing or ambiguous" in message
+
+
 def test_normalize_trade_records_uses_default_instrument_type_for_unclear_mapped_values():
     df = pd.DataFrame(
         [
@@ -667,6 +701,7 @@ def test_normalize_trade_records_does_not_force_option_from_non_option_raw_symbo
         mapping=mapping,
         account_id="acc-stock",
         broker="generic",
+        default_instrument_type="STOCK",
     )
 
     assert issues == []
