@@ -112,6 +112,11 @@ SQLITE_IMPORT_INDEX_EXPECTATIONS: dict[str, dict[str, object]] = {
         "columns": ("account_id", "file_signature"),
         "unique": False,
     },
+    "ix_trades_raw_account_imported_at": {
+        "table": "trades_raw",
+        "columns": ("account_id", "imported_at"),
+        "unique": False,
+    },
     "ix_trades_norm_account_exec_id": {
         "table": "trades_normalized",
         "columns": ("account_id", "executed_at", "id"),

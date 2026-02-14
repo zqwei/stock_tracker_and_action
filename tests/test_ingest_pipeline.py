@@ -1074,14 +1074,53 @@ def test_insert_trade_import_duplicate_heavy_batch_reports_perf_stats():
         assert session.scalar(select(func.count()).select_from(TradeNormalized)) == unique_trade_keys
 
         expected_input = unique_trade_keys * repeats_per_key
+        assert set(perf_stats) == {
+            "input_raw_rows",
+            "input_normalized_rows",
+            "prepared_raw_rows",
+            "prepared_normalized_rows",
+            "deduped_raw_rows",
+            "deduped_normalized_rows",
+            "inserted_raw_rows",
+            "inserted_normalized_rows",
+            "conflict_raw_rows",
+            "conflict_normalized_rows",
+            "prepare_seconds",
+            "dedupe_seconds",
+            "insert_seconds",
+            "total_seconds",
+        }
         assert perf_stats["input_raw_rows"] == expected_input
         assert perf_stats["input_normalized_rows"] == expected_input
         assert perf_stats["prepared_raw_rows"] == unique_trade_keys
         assert perf_stats["prepared_normalized_rows"] == unique_trade_keys
+        assert perf_stats["deduped_raw_rows"] == expected_input - unique_trade_keys
+        assert perf_stats["deduped_normalized_rows"] == expected_input - unique_trade_keys
         assert perf_stats["inserted_raw_rows"] == unique_trade_keys
         assert perf_stats["inserted_normalized_rows"] == unique_trade_keys
+        assert perf_stats["conflict_raw_rows"] == 0
+        assert perf_stats["conflict_normalized_rows"] == 0
         assert float(perf_stats["total_seconds"]) >= float(perf_stats["insert_seconds"]) >= 0.0
         assert float(perf_stats["dedupe_seconds"]) >= 0.0
+
+        reimport_stats: dict[str, float | int] = {}
+        reimported = insert_trade_import(
+            session=session,
+            account_id=account.id,
+            broker="B1",
+            source_file="dup-heavy.csv",
+            file_sig="sig-dup-heavy",
+            mapping_name="m1",
+            raw_rows=raw_rows,
+            normalized_rows=normalized_rows,
+            perf_stats=reimport_stats,
+        )
+
+        assert reimported == (0, 0)
+        assert reimport_stats["prepared_raw_rows"] == unique_trade_keys
+        assert reimport_stats["prepared_normalized_rows"] == unique_trade_keys
+        assert reimport_stats["conflict_raw_rows"] == unique_trade_keys
+        assert reimport_stats["conflict_normalized_rows"] == unique_trade_keys
 
 
 def test_insert_cash_activity_duplicate_heavy_batch_reports_perf_stats():
@@ -1114,11 +1153,30 @@ def test_insert_cash_activity_duplicate_heavy_batch_reports_perf_stats():
         assert session.scalar(select(func.count()).select_from(CashActivity)) == unique_rows
 
         expected_input = unique_rows * repeats_per_row
+        assert set(perf_stats) == {
+            "input_rows",
+            "prepared_rows",
+            "deduped_rows",
+            "inserted_rows",
+            "conflict_rows",
+            "prepare_seconds",
+            "dedupe_seconds",
+            "insert_seconds",
+            "total_seconds",
+        }
         assert perf_stats["input_rows"] == expected_input
         assert perf_stats["prepared_rows"] == unique_rows
+        assert perf_stats["deduped_rows"] == expected_input - unique_rows
         assert perf_stats["inserted_rows"] == unique_rows
+        assert perf_stats["conflict_rows"] == 0
         assert float(perf_stats["total_seconds"]) >= float(perf_stats["insert_seconds"]) >= 0.0
         assert float(perf_stats["dedupe_seconds"]) >= 0.0
+
+        reimport_stats: dict[str, float | int] = {}
+        reimported = insert_cash_activity(session, rows, perf_stats=reimport_stats)
+        assert reimported == 0
+        assert reimport_stats["prepared_rows"] == unique_rows
+        assert reimport_stats["conflict_rows"] == unique_rows
 
 
 def test_delete_account_if_empty_removes_account_without_dependencies():

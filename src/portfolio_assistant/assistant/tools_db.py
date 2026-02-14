@@ -416,14 +416,22 @@ def insert_trade_import(
     if perf_stats is not None:
         insert_seconds = perf_counter() - insert_started
         total_seconds = perf_counter() - total_started
+        deduped_raw_rows = max(input_raw_rows - len(prepared_raw_rows), 0)
+        deduped_normalized_rows = max(input_normalized_rows - len(prepared_normalized_rows), 0)
+        conflict_raw_rows = max(len(prepared_raw_rows) - raw_count, 0)
+        conflict_normalized_rows = max(len(prepared_normalized_rows) - normalized_count, 0)
         perf_stats.update(
             {
                 "input_raw_rows": input_raw_rows,
                 "input_normalized_rows": input_normalized_rows,
                 "prepared_raw_rows": len(prepared_raw_rows),
                 "prepared_normalized_rows": len(prepared_normalized_rows),
+                "deduped_raw_rows": deduped_raw_rows,
+                "deduped_normalized_rows": deduped_normalized_rows,
                 "inserted_raw_rows": raw_count,
                 "inserted_normalized_rows": normalized_count,
+                "conflict_raw_rows": conflict_raw_rows,
+                "conflict_normalized_rows": conflict_normalized_rows,
                 "prepare_seconds": round(prepare_seconds, 6),
                 "dedupe_seconds": round(dedupe_seconds, 6),
                 "insert_seconds": round(insert_seconds, 6),
@@ -472,11 +480,15 @@ def insert_cash_activity(
     if perf_stats is not None:
         insert_seconds = perf_counter() - insert_started
         total_seconds = perf_counter() - total_started
+        deduped_rows = max(input_rows - len(prepared_rows), 0)
+        conflict_rows = max(len(prepared_rows) - inserted, 0)
         perf_stats.update(
             {
                 "input_rows": input_rows,
                 "prepared_rows": len(prepared_rows),
+                "deduped_rows": deduped_rows,
                 "inserted_rows": inserted,
+                "conflict_rows": conflict_rows,
                 "prepare_seconds": round(prepare_seconds, 6),
                 "dedupe_seconds": round(dedupe_seconds, 6),
                 "insert_seconds": round(insert_seconds, 6),

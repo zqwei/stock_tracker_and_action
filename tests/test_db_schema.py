@@ -1,12 +1,26 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 from sqlalchemy import create_engine, func, inspect, select, text
 from sqlalchemy.orm import Session
 
 from portfolio_assistant.db.migrate import migrate
 from portfolio_assistant.db.models import Account, Base, CashActivity, TradeNormalized, TradeRaw
+
+
+def test_db_modules_do_not_use_deprecated_datetime_utcnow():
+    repo_root = Path(__file__).resolve().parents[1]
+    guarded_paths = (
+        "src/portfolio_assistant/db/models.py",
+        "src/portfolio_assistant/db/migrate.py",
+        "src/portfolio_assistant/assistant/tools_db.py",
+    )
+    for relative_path in guarded_paths:
+        contents = (repo_root / relative_path).read_text(encoding="utf-8")
+        assert "datetime.utcnow(" not in contents
+        assert ".utcnow(" not in contents
 
 
 def _sqlite_index_signature(
@@ -155,6 +169,7 @@ def test_migrate_creates_import_path_indexes(tmp_path):
     assert {
         "ux_trades_raw_account_row_hash",
         "ix_trades_raw_account_signature",
+        "ix_trades_raw_account_imported_at",
         "ix_trades_norm_account_exec_id",
         "ux_trades_norm_account_dedupe",
         "ix_cash_activity_account_posted",
@@ -179,6 +194,13 @@ def test_migrate_repairs_import_index_drift(tmp_path):
                 "ON trades_normalized (dedupe_key)"
             )
         )
+        conn.execute(text("DROP INDEX IF EXISTS ix_trades_raw_account_imported_at"))
+        conn.execute(
+            text(
+                "CREATE INDEX ix_trades_raw_account_imported_at "
+                "ON trades_raw (imported_at)"
+            )
+        )
         conn.execute(text("DROP INDEX IF EXISTS ix_cash_activity_account_posted"))
         conn.execute(
             text("CREATE INDEX ix_cash_activity_account_posted ON cash_activity (posted_at)")
@@ -197,6 +219,11 @@ def test_migrate_repairs_import_index_drift(tmp_path):
             table_name="trades_normalized",
             index_name="ux_trades_norm_account_dedupe",
         ) == (True, ("account_id", "dedupe_key"))
+        assert _sqlite_index_signature(
+            conn,
+            table_name="trades_raw",
+            index_name="ix_trades_raw_account_imported_at",
+        ) == (False, ("account_id", "imported_at"))
         assert _sqlite_index_signature(
             conn,
             table_name="cash_activity",
