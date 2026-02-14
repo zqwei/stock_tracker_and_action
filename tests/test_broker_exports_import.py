@@ -5,8 +5,11 @@ from datetime import date
 import pandas as pd
 
 from portfolio_assistant.ingest.broker_exports_import import (
+    broker_export_mapping_hints,
     broker_export_totals,
+    infer_broker_export_column_map,
     import_reconciliation_inputs,
+    load_broker_export_csv_preview,
     normalize_broker_export_records,
     validate_broker_export_mapping,
 )
@@ -170,6 +173,37 @@ def test_validate_broker_export_mapping_reports_ambiguous_token_subset_source_co
     _normalized_mapping, errors = validate_broker_export_mapping(mapping, columns=csv_columns)
 
     assert any("matches multiple CSV columns by tokens" in error for error in errors), errors
+    assert any("Date Sold Local" in error and "Date Sold UTC" in error for error in errors), errors
+
+
+def test_infer_broker_export_column_map_uses_broker_alias_preset():
+    columns = ["Trade Date", "Amount", "Cost Basis", "Symbol"]
+
+    generic_mapping = infer_broker_export_column_map(columns, broker="generic")
+    webull_mapping = infer_broker_export_column_map(columns, broker="Webull Securities Inc")
+
+    assert "proceeds" not in generic_mapping
+    assert webull_mapping["proceeds"] == "Amount"
+    assert webull_mapping["date_sold"] == "Trade Date"
+
+
+def test_broker_export_mapping_hints_include_preset_and_missing_required_guidance():
+    columns = ["Description", "Date Sold Local", "Date Sold UTC", "Ticker"]
+    hints = broker_export_mapping_hints(columns, broker="Unknown Broker XYZ")
+    assert any("not recognized" in hint and "generic" in hint for hint in hints)
+    assert any("Map `proceeds` manually" in hint for hint in hints)
+    assert any("Map `cost_basis` manually" in hint for hint in hints)
+
+
+def test_load_broker_export_csv_preview_includes_resolved_preset_and_hints(tmp_path):
+    csv_path = tmp_path / "broker.csv"
+    csv_path.write_text("Trade Date,Amount,Cost Basis\n01/05/2025,100,90\n", encoding="utf-8")
+
+    preview = load_broker_export_csv_preview(csv_path, broker="Webull Financial LLC")
+
+    assert preview.resolved_broker_preset == "webull"
+    assert preview.mapping["proceeds"] == "Amount"
+    assert any("matched `webull`" in hint for hint in preview.hints)
 
 
 def test_broker_export_totals_sums_by_term():

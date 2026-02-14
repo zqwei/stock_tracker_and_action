@@ -76,6 +76,17 @@ BROKER_TEMPLATES = {
     },
 }
 
+BROKER_TEMPLATE_ALIASES: dict[str, list[str]] = {
+    "generic": ["generic", "default", "other broker", "unknown broker"],
+    "webull": [
+        "webull",
+        "webull financial",
+        "webull financial llc",
+        "webull securities",
+        "webull securities inc",
+    ],
+}
+
 CASH_TEMPLATES = {
     "generic": {
         "posted_at": ["date", "posted at", "time"],
@@ -108,13 +119,13 @@ def _tokenize(text: str) -> list[str]:
     return [_TOKEN_ALIASES.get(token, token) for token in tokens]
 
 
-def _resolve_by_token_subset(
+def _token_subset_candidates(
     query_text: str,
     column_token_sets: dict[str, set[str]],
-) -> tuple[str | None, bool]:
+) -> list[str]:
     query_tokens = set(_tokenize(query_text))
     if not query_tokens:
-        return None, False
+        return []
 
     candidates: list[tuple[int, int, str]] = []
     for column, tokens in column_token_sets.items():
@@ -124,14 +135,91 @@ def _resolve_by_token_subset(
         candidates.append((extra_tokens, len(tokens), column))
 
     if not candidates:
-        return None, False
+        return []
 
     candidates.sort()
-    best_extra, best_len, best_column = candidates[0]
-    ties = [entry for entry in candidates if entry[0] == best_extra and entry[1] == best_len]
-    if len(ties) > 1:
+    best_extra, best_len, _best_column = candidates[0]
+    return [column for extra, length, column in candidates if extra == best_extra and length == best_len]
+
+
+def _resolve_by_token_subset(
+    query_text: str,
+    column_token_sets: dict[str, set[str]],
+) -> tuple[str | None, bool]:
+    best_candidates = _token_subset_candidates(query_text, column_token_sets)
+    if not best_candidates:
+        return None, False
+    if len(best_candidates) > 1:
         return None, True
-    return best_column, False
+    return best_candidates[0], False
+
+
+def _suggest_by_token_overlap(
+    query_text: str,
+    column_token_sets: dict[str, set[str]],
+    *,
+    limit: int = 3,
+) -> list[str]:
+    query_tokens = set(_tokenize(query_text))
+    if not query_tokens:
+        return []
+
+    ranked: list[tuple[int, int, str]] = []
+    for column, tokens in column_token_sets.items():
+        overlap = len(query_tokens.intersection(tokens))
+        if overlap <= 0:
+            continue
+        ranked.append((overlap, -abs(len(tokens) - len(query_tokens)), column))
+
+    ranked.sort(reverse=True)
+    ordered: list[str] = []
+    for _overlap, _distance, column in ranked:
+        if column in ordered:
+            continue
+        ordered.append(column)
+        if len(ordered) >= limit:
+            break
+    return ordered
+
+
+def _format_column_candidates(columns: list[str], *, limit: int = 3) -> str:
+    if not columns:
+        return ""
+    clipped = columns[:limit]
+    text = ", ".join(f"'{column}'" for column in clipped)
+    remaining = len(columns) - len(clipped)
+    if remaining > 0:
+        text = f"{text}, +{remaining} more"
+    return text
+
+
+def resolve_broker_template_key(broker: str) -> str:
+    broker_text = str(broker or "").strip()
+    if not broker_text:
+        return "generic"
+
+    normalized_broker = _normalize(broker_text)
+    if normalized_broker in BROKER_TEMPLATES:
+        return normalized_broker
+
+    broker_tokens = set(_tokenize(normalized_broker))
+    for template_key, aliases in BROKER_TEMPLATE_ALIASES.items():
+        if template_key not in BROKER_TEMPLATES:
+            continue
+        for alias in aliases:
+            normalized_alias = _normalize(alias)
+            if normalized_alias == normalized_broker:
+                return template_key
+            alias_tokens = set(_tokenize(normalized_alias))
+            if alias_tokens and alias_tokens.issubset(broker_tokens):
+                return template_key
+
+    for template_key in BROKER_TEMPLATES:
+        key_tokens = set(_tokenize(template_key))
+        if key_tokens and key_tokens.issubset(broker_tokens):
+            return template_key
+
+    return "generic"
 
 
 def file_signature(columns: list[str]) -> str:
@@ -180,7 +268,7 @@ def _infer_with_template(
 
 
 def infer_trade_column_map(columns: list[str], broker: str = "generic") -> dict[str, str]:
-    broker_key = broker.lower()
+    broker_key = resolve_broker_template_key(broker)
     template = BROKER_TEMPLATES.get(broker_key, BROKER_TEMPLATES["generic"])
     mapping = _infer_with_template(columns, template=template)
 
@@ -204,7 +292,8 @@ def infer_trade_column_map(columns: list[str], broker: str = "generic") -> dict[
 
 
 def infer_cash_column_map(columns: list[str], broker: str = "generic") -> dict[str, str]:
-    template = CASH_TEMPLATES.get(broker.lower(), CASH_TEMPLATES["generic"])
+    broker_key = resolve_broker_template_key(broker)
+    template = CASH_TEMPLATES.get(broker_key, CASH_TEMPLATES["generic"])
     return _infer_with_template(columns, template=template)
 
 
@@ -242,10 +331,25 @@ CASH_FIELD_HELP: dict[str, str] = {
 
 
 def trade_mapping_hints(columns: list[str], broker: str = "generic") -> list[str]:
+    broker_key = resolve_broker_template_key(broker)
+    broker_text = str(broker or "").strip()
+    normalized_broker = _normalize(broker_text) if broker_text else ""
     normalized = {_normalize(column) for column in columns}
+    normalized_to_original = {_normalize(column): column for column in columns}
+    column_token_sets = {column: set(_tokenize(column)) for column in columns}
+    template = BROKER_TEMPLATES.get(broker_key, BROKER_TEMPLATES["generic"])
     hints: list[str] = []
 
-    if broker.strip().lower() == "webull":
+    if broker_text and broker_key == "generic" and normalized_broker not in {"", "generic"}:
+        hints.append(
+            f"Broker preset `{broker_text}` is not recognized; using generic mapping heuristics."
+        )
+    elif broker_text and normalized_broker and broker_key != normalized_broker:
+        hints.append(
+            f"Broker preset `{broker_text}` matched `{broker_key}` template."
+        )
+
+    if broker_key == "webull":
         if "filled" in normalized and "total qty" in normalized:
             hints.append("Use `Filled` for quantity; `Total Qty` includes unfilled size.")
         if "filled time" in normalized and "placed time" in normalized:
@@ -277,7 +381,39 @@ def trade_mapping_hints(columns: list[str], broker: str = "generic") -> list[str
     if "total cost" in normalized:
         hints.append("Map `Total Cost` if you want automatic fee estimation when fee column is missing.")
 
-    return hints
+    ambiguous_hint_count = 0
+    for field in TRADE_REQUIRED_FIELDS:
+        if ambiguous_hint_count >= 3:
+            break
+        alias_pool = [field, *BROKER_TEMPLATES["generic"].get(field, []), *template.get(field, [])]
+        if any(_normalize(alias) in normalized_to_original for alias in alias_pool):
+            continue
+
+        best_ambiguous_candidates: list[str] = []
+        for alias in alias_pool:
+            token_candidates = _token_subset_candidates(alias, column_token_sets)
+            if len(token_candidates) <= 1:
+                continue
+            if not best_ambiguous_candidates or len(token_candidates) < len(best_ambiguous_candidates):
+                best_ambiguous_candidates = token_candidates
+            if len(best_ambiguous_candidates) == 2:
+                break
+
+        if best_ambiguous_candidates:
+            hints.append(
+                f"`{field}` matches multiple columns ({_format_column_candidates(best_ambiguous_candidates)}). "
+                "Pick the exact header in mapping."
+            )
+            ambiguous_hint_count += 1
+
+    deduped_hints: list[str] = []
+    seen_hints: set[str] = set()
+    for hint in hints:
+        if hint in seen_hints:
+            continue
+        seen_hints.add(hint)
+        deduped_hints.append(hint)
+    return deduped_hints
 
 
 def suggest_trade_column_candidates(
@@ -290,7 +426,7 @@ def suggest_trade_column_candidates(
     if canonical_field not in TRADE_CANONICAL_FIELDS:
         return []
 
-    broker_key = broker.lower()
+    broker_key = resolve_broker_template_key(broker)
     generic_template = BROKER_TEMPLATES["generic"]
     broker_template = BROKER_TEMPLATES.get(broker_key, generic_template)
     alias_pool = [
@@ -427,18 +563,32 @@ def validate_mapping(
             else:
                 normalized_source = _normalize(source_text)
                 if normalized_source in ambiguous_normalized_columns:
+                    matching_columns = [
+                        str(col)
+                        for col in (columns or [])
+                        if _normalize(str(col)) == normalized_source
+                    ]
+                    candidate_text = _format_column_candidates(matching_columns)
                     errors.append(
                         "Source column "
-                        f"'{source_text}' for field '{resolved_canonical}' is ambiguous in the CSV."
+                        f"'{source_text}' for field '{resolved_canonical}' is ambiguous in the CSV"
+                        + (f" ({candidate_text})." if candidate_text else ".")
                     )
                     continue
                 resolved_source = normalized_columns.get(normalized_source)
                 if resolved_source is None:
                     compact_source = _match_key(source_text)
                     if compact_source in ambiguous_compact_columns:
+                        matching_columns = [
+                            str(col)
+                            for col in (columns or [])
+                            if _match_key(str(col)) == compact_source
+                        ]
+                        candidate_text = _format_column_candidates(matching_columns)
                         errors.append(
                             "Source column "
-                            f"'{source_text}' for field '{resolved_canonical}' is ambiguous in the CSV."
+                            f"'{source_text}' for field '{resolved_canonical}' is ambiguous in the CSV"
+                            + (f" ({candidate_text})." if candidate_text else ".")
                         )
                         continue
                     resolved_source = compact_columns.get(compact_source)
@@ -448,16 +598,29 @@ def validate_mapping(
                             column_token_sets,
                         )
                         if token_ambiguous:
+                            ambiguous_matches = _token_subset_candidates(
+                                source_text,
+                                column_token_sets,
+                            )
+                            candidate_text = _format_column_candidates(ambiguous_matches)
                             errors.append(
                                 "Source column "
-                                f"'{source_text}' for field '{resolved_canonical}' matches multiple CSV columns."
+                                f"'{source_text}' for field '{resolved_canonical}' matches multiple CSV columns"
+                                + (f" ({candidate_text})." if candidate_text else ".")
                             )
                             continue
                         if token_source is not None:
                             resolved_source = token_source
                     if resolved_source is None:
+                        suggestions = _suggest_by_token_overlap(source_text, column_token_sets, limit=3)
+                        suggestion_suffix = (
+                            f" Suggested columns: {_format_column_candidates(suggestions)}."
+                            if suggestions
+                            else ""
+                        )
                         errors.append(
                             f"Source column '{source_text}' for field '{resolved_canonical}' is not present in the CSV."
+                            f"{suggestion_suffix}"
                         )
                         continue
         else:

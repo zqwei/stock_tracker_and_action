@@ -166,6 +166,30 @@ def test_infer_trade_column_map_webull_prefers_filled_time_avg_price_and_filled_
     assert any("Avg Price" in hint for hint in hints)
 
 
+def test_infer_trade_column_map_accepts_webull_broker_alias_name():
+    columns = [
+        "Name",
+        "Symbol",
+        "Side",
+        "Status",
+        "Filled",
+        "Total Qty",
+        "Price",
+        "Avg Price",
+        "Placed Time",
+        "Filled Time",
+    ]
+
+    mapping = infer_trade_column_map(columns, broker="Webull Financial LLC")
+
+    assert mapping["executed_at"] == "Filled Time"
+    assert mapping["quantity"] == "Filled"
+    assert mapping["price"] == "Avg Price"
+
+    hints = trade_mapping_hints(columns, broker="Webull Financial LLC")
+    assert any("matched `webull` template" in hint for hint in hints)
+
+
 def test_infer_trade_column_map_handles_token_variant_headers():
     columns = [
         "Trade Date / Time",
@@ -383,6 +407,13 @@ def test_validate_mapping_reports_ambiguous_token_subset_source_name():
     assert cleaned["quantity"] == "Qty"
     assert cleaned["price"] == "Price"
     assert any("matches multiple CSV columns" in error for error in errors), errors
+    assert any("Trade Date Local" in error and "Trade Date UTC" in error for error in errors), errors
+
+
+def test_trade_mapping_hints_reports_unknown_broker_template_fallback():
+    columns = ["Trade Date", "Buy/Sell", "Quantity", "Unit Price", "Symbol"]
+    hints = trade_mapping_hints(columns, broker="Unknown Broker XYZ")
+    assert any("not recognized" in hint and "generic" in hint for hint in hints)
 
 
 def test_suggest_trade_column_candidates_returns_best_matches_for_missing_required_fields():

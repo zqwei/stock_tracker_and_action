@@ -218,6 +218,7 @@ def normalize_trade_records(
         canonical_fields=TRADE_CANONICAL_FIELDS,
         required_fields=TRADE_REQUIRED_FIELDS,
     ).fillna("")
+    instrument_source_column = cleaned_mapping.get("instrument_type")
     for row_number, row_data in enumerate(renamed.to_dict(orient="records"), start=1):
         side = normalize_side(row_data.get("side"))
         symbol_value = str(row_data.get("symbol", "")).strip().upper() or None
@@ -249,9 +250,21 @@ def normalize_trade_records(
         # Contract for UI/consumers: when instrument type is neither mapped nor inferable,
         # rows are skipped with a warning so the user can choose an explicit Stock/Option default.
         if not instrument_value and side not in {"BTO", "STO", "BTC", "STC"} and not parsed_option:
+            if instrument_source_column:
+                source_value = str(row_data.get("instrument_type", "")).strip()
+                if source_value:
+                    detail = (
+                        f"mapped `{instrument_source_column}` value '{source_value}' is not a recognized type"
+                    )
+                else:
+                    detail = f"mapped `{instrument_source_column}` value is blank"
+            else:
+                detail = "no Instrument Type column is mapped"
             issues.append(
                 make_import_issue(
-                    f"Row {row_number}: instrument type is missing or ambiguous; choose Stock or Option as default.",
+                    "Row "
+                    f"{row_number}: instrument type is missing or ambiguous ({detail}); "
+                    "choose Stock or Option as default.",
                     severity="WARNING",
                 )
             )
