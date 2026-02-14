@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -53,6 +53,51 @@ _FIELD_ALIASES = {
     ],
     "gain_or_loss": ["gain/loss", "gain loss", "gain", "profit/loss", "pnl"],
     "term": ["term", "holding period", "st/lt", "short/long"],
+}
+
+_BROKER_EXPORT_PRESET_ALIASES: dict[str, list[str]] = {
+    "generic": ["generic", "default", "other broker", "unknown broker"],
+    "webull": [
+        "webull",
+        "webull financial",
+        "webull financial llc",
+        "webull securities",
+        "webull securities inc",
+    ],
+    "fidelity": [
+        "fidelity",
+        "fidelity investments",
+        "fidelity brokerage",
+    ],
+    "schwab": [
+        "charles schwab",
+        "schwab",
+    ],
+    "robinhood": ["robinhood", "robinhood markets"],
+}
+
+_BROKER_EXPORT_PRESET_FIELD_ALIASES: dict[str, dict[str, list[str]]] = {
+    "webull": {
+        "date_sold": ["trade date"],
+        "proceeds": ["amount"],
+        "term": ["long/short position"],
+        "wash_sale_disallowed": ["disallowed loss"],
+    },
+    "fidelity": {
+        "date_sold": ["date sold or disposed"],
+        "proceeds": ["sales price"],
+        "cost_basis": ["adjusted cost basis"],
+        "term": ["term code"],
+    },
+    "schwab": {
+        "date_sold": ["date sold/disposed"],
+        "proceeds": ["sales proceeds"],
+        "cost_basis": ["adjusted basis"],
+    },
+    "robinhood": {
+        "date_sold": ["trade date"],
+        "proceeds": ["amount"],
+    },
 }
 
 _CANONICAL_FIELD_ALIASES = {
@@ -129,6 +174,8 @@ class BrokerExportPreview:
     mapping: dict[str, str]
     missing_required: list[str]
     signature: str
+    hints: list[str] = field(default_factory=list)
+    resolved_broker_preset: str = "generic"
 
 
 @dataclass(frozen=True)
@@ -157,13 +204,13 @@ def _tokenize(text: str) -> set[str]:
     return {_TOKEN_ALIASES.get(token, token) for token in raw_tokens}
 
 
-def _resolve_by_token_subset(
+def _token_subset_candidates(
     query_text: str,
     column_token_sets: dict[str, set[str]],
-) -> tuple[str | None, bool]:
+) -> list[str]:
     query_tokens = _tokenize(query_text)
     if not query_tokens:
-        return None, False
+        return []
 
     candidates: list[tuple[int, int, str]] = []
     for column, tokens in column_token_sets.items():
@@ -172,14 +219,61 @@ def _resolve_by_token_subset(
         candidates.append((len(tokens - query_tokens), len(tokens), column))
 
     if not candidates:
-        return None, False
+        return []
 
     candidates.sort()
-    best_extra, best_len, best_column = candidates[0]
-    ties = [entry for entry in candidates if entry[0] == best_extra and entry[1] == best_len]
-    if len(ties) > 1:
+    best_extra, best_len, _best_column = candidates[0]
+    return [column for extra, length, column in candidates if extra == best_extra and length == best_len]
+
+
+def _resolve_by_token_subset(
+    query_text: str,
+    column_token_sets: dict[str, set[str]],
+) -> tuple[str | None, bool]:
+    best_candidates = _token_subset_candidates(query_text, column_token_sets)
+    if not best_candidates:
+        return None, False
+    if len(best_candidates) > 1:
         return None, True
-    return best_column, False
+    return best_candidates[0], False
+
+
+def _format_column_candidates(columns: list[str], *, limit: int = 3) -> str:
+    if not columns:
+        return ""
+    clipped = columns[:limit]
+    text = ", ".join(f"'{column}'" for column in clipped)
+    remaining = len(columns) - len(clipped)
+    if remaining > 0:
+        text = f"{text}, +{remaining} more"
+    return text
+
+
+def _resolve_broker_export_preset_key(broker: str) -> str:
+    broker_text = str(broker or "").strip()
+    if not broker_text:
+        return "generic"
+
+    normalized_broker = _normalize(broker_text)
+    if normalized_broker in _BROKER_EXPORT_PRESET_ALIASES:
+        return normalized_broker
+
+    broker_tokens = _tokenize(normalized_broker)
+    for preset, aliases in _BROKER_EXPORT_PRESET_ALIASES.items():
+        for alias in aliases:
+            normalized_alias = _normalize(alias)
+            if normalized_alias == normalized_broker:
+                return preset
+            alias_tokens = _tokenize(normalized_alias)
+            if alias_tokens and alias_tokens.issubset(broker_tokens):
+                return preset
+
+    for preset in _BROKER_EXPORT_PRESET_ALIASES:
+        preset_tokens = _tokenize(preset)
+        if preset_tokens and preset_tokens.issubset(broker_tokens):
+            return preset
+
+    return "generic"
 
 
 def _canonical_field_name(field: str) -> str | None:
@@ -188,6 +282,59 @@ def _canonical_field_name(field: str) -> str | None:
     if resolved in BROKER_EXPORT_CANONICAL_FIELDS:
         return resolved
     return None
+
+
+def _broker_field_aliases(field: str, *, broker: str) -> list[str]:
+    broker_key = _resolve_broker_export_preset_key(broker)
+    preset_aliases = _BROKER_EXPORT_PRESET_FIELD_ALIASES.get(broker_key, {}).get(field, [])
+    return [*(_FIELD_ALIASES.get(field, [])), *preset_aliases]
+
+
+def suggest_broker_export_column_candidates(
+    columns: list[str],
+    canonical_field: str,
+    *,
+    broker: str = "generic",
+    limit: int = 3,
+) -> list[str]:
+    field = _canonical_field_name(canonical_field)
+    if field is None:
+        return []
+
+    alias_pool = [field, *_broker_field_aliases(field, broker=broker)]
+    alias_normalized = {_normalize(alias) for alias in alias_pool}
+    alias_tokens = {token for alias in alias_pool for token in _tokenize(alias)}
+
+    ranked: list[tuple[int, int, str]] = []
+    for idx, column in enumerate(columns):
+        normalized_column = _normalize(column)
+        column_tokens = _tokenize(column)
+        score = 0
+        if normalized_column in alias_normalized:
+            score += 200
+        overlap = len(alias_tokens.intersection(column_tokens))
+        if overlap > 0:
+            score += overlap * 25
+        if field == "date_sold" and {"date", "sold", "trade", "close"}.intersection(column_tokens):
+            score += 10
+        if field == "proceeds" and {"proceeds", "sale", "sales", "amount", "total"}.intersection(
+            column_tokens
+        ):
+            score += 10
+        if field == "cost_basis" and {"cost", "basis", "adjusted"}.intersection(column_tokens):
+            score += 10
+        if score > 0:
+            ranked.append((score, -idx, column))
+
+    ranked.sort(reverse=True)
+    ordered: list[str] = []
+    for _score, _order, column in ranked:
+        if column in ordered:
+            continue
+        ordered.append(column)
+        if len(ordered) >= limit:
+            break
+    return ordered
 
 
 def normalize_term(value: Any, *, term_map: dict[str, str] | None = None) -> str | None:
@@ -234,6 +381,17 @@ def _resolve_source_column(source: str, columns: list[str] | None) -> tuple[str 
 
     normalized_source = _normalize(source_text)
     if normalized_source in ambiguous_normalized:
+        matching = [
+            str(column)
+            for column in columns
+            if _normalize(str(column)) == normalized_source
+        ]
+        candidate_text = _format_column_candidates(matching)
+        if candidate_text:
+            return (
+                None,
+                f"source column '{source_text}' is ambiguous in the CSV ({candidate_text})",
+            )
         return None, f"source column '{source_text}' is ambiguous in the CSV"
     resolved = normalized_columns.get(normalized_source)
     if resolved is None:
@@ -242,23 +400,40 @@ def _resolve_source_column(source: str, columns: list[str] | None) -> tuple[str 
             column_token_sets,
         )
         if token_ambiguous:
+            ambiguous_matches = _token_subset_candidates(source_text, column_token_sets)
+            candidate_text = _format_column_candidates(ambiguous_matches)
             return (
                 None,
-                f"source column '{source_text}' matches multiple CSV columns by tokens",
+                "source column "
+                f"'{source_text}' matches multiple CSV columns by tokens"
+                + (f" ({candidate_text})" if candidate_text else ""),
             )
         if token_source is None:
+            suggestions = suggest_broker_export_column_candidates(
+                columns,
+                source_text,
+                limit=3,
+            )
+            if suggestions:
+                return (
+                    None,
+                    "source column "
+                    f"'{source_text}' is not present in the CSV. "
+                    f"Suggested columns: {_format_column_candidates(suggestions)}",
+                )
             return None, f"source column '{source_text}' is not present in the CSV"
         resolved = token_source
     return resolved, None
 
 
-def infer_broker_export_column_map(columns: list[str]) -> dict[str, str]:
+def infer_broker_export_column_map(columns: list[str], *, broker: str = "generic") -> dict[str, str]:
+    broker_key = _resolve_broker_export_preset_key(broker)
     normalized_to_original = {_normalize(column): column for column in columns}
     column_token_sets = {str(column): _tokenize(column) for column in columns}
     inferred: dict[str, str] = {}
 
     for field in BROKER_EXPORT_CANONICAL_FIELDS:
-        aliases = _FIELD_ALIASES.get(field, [])
+        aliases = _broker_field_aliases(field, broker=broker_key)
         candidates = [field, *aliases]
         for candidate in candidates:
             source_column = normalized_to_original.get(_normalize(candidate))
@@ -276,8 +451,54 @@ def infer_broker_export_column_map(columns: list[str]) -> dict[str, str]:
     return inferred
 
 
-def infer_broker_tax_column_map(columns: list[str]) -> dict[str, str]:
-    return infer_broker_export_column_map(columns)
+def infer_broker_tax_column_map(columns: list[str], *, broker: str = "generic") -> dict[str, str]:
+    return infer_broker_export_column_map(columns, broker=broker)
+
+
+def broker_export_mapping_hints(columns: list[str], *, broker: str = "generic") -> list[str]:
+    hints: list[str] = []
+    broker_text = str(broker or "").strip()
+    broker_key = _resolve_broker_export_preset_key(broker_text)
+    normalized_broker = _normalize(broker_text) if broker_text else ""
+
+    if broker_text and broker_key == "generic" and normalized_broker not in {"", "generic"}:
+        hints.append(
+            f"Broker preset `{broker_text}` is not recognized; using generic tax-export mapping heuristics."
+        )
+    elif broker_text and normalized_broker and broker_key != normalized_broker:
+        hints.append(f"Broker preset `{broker_text}` matched `{broker_key}` tax-export hints.")
+
+    if _looks_like_realized_activity_export(columns):
+        hints.append(
+            "Detected realized-activity export format. SELL rows can derive proceeds/cost basis automatically."
+        )
+
+    inferred = infer_broker_export_column_map(columns, broker=broker_key)
+    missing_required = [
+        field for field in BROKER_EXPORT_REQUIRED_FIELDS if field not in inferred
+    ]
+    for field in missing_required:
+        suggestions = suggest_broker_export_column_candidates(
+            columns,
+            field,
+            broker=broker_key,
+            limit=3,
+        )
+        if suggestions:
+            hints.append(
+                f"Map `{field}` manually. Suggested columns: {_format_column_candidates(suggestions)}."
+            )
+        else:
+            hints.append(f"Map `{field}` manually. This field is required for reconciliation totals.")
+
+    deduped_hints: list[str] = []
+    seen_hints: set[str] = set()
+    for hint in hints:
+        if hint in seen_hints:
+            continue
+        seen_hints.add(hint)
+        deduped_hints.append(hint)
+    return deduped_hints
 
 
 def _looks_like_realized_activity_export(columns: list[str]) -> bool:
@@ -524,9 +745,14 @@ def _coerce_simple_mapping(mapping: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _to_simple_mapping(mapping: dict[str, Any] | None, columns: list[str]) -> dict[str, str]:
+def _to_simple_mapping(
+    mapping: dict[str, Any] | None,
+    columns: list[str],
+    *,
+    broker: str = "generic",
+) -> dict[str, str]:
     if mapping is None:
-        return infer_broker_export_column_map(columns)
+        return infer_broker_export_column_map(columns, broker=broker)
 
     if _mapping_is_schema(mapping):
         simple: dict[str, str] = {}
@@ -691,8 +917,25 @@ def validate_broker_export_mapping(
     missing_required = [
         field for field in BROKER_EXPORT_REQUIRED_FIELDS if field not in field_to_source
     ]
+    broker_for_suggestions = str(schema_mapping.get("broker", "")).strip() or "generic"
     for field in missing_required:
-        errors.append(f"Missing required field mapping '{field}'.")
+        suggestions = (
+            suggest_broker_export_column_candidates(
+                columns or [],
+                field,
+                broker=broker_for_suggestions,
+                limit=3,
+            )
+            if columns
+            else []
+        )
+        if suggestions:
+            errors.append(
+                f"Missing required field mapping '{field}'. "
+                f"Suggested source columns: {_format_column_candidates(suggestions)}."
+            )
+        else:
+            errors.append(f"Missing required field mapping '{field}'.")
 
     normalized_mapping = {
         "version": int(schema_mapping.get("version", 1) or 1),
@@ -728,14 +971,17 @@ def load_broker_export_csv_preview(
     file_obj: str | Path | BinaryIO,
     mapping: dict[str, Any] | None = None,
     *,
+    broker: str = "generic",
     max_rows: int = 200,
 ) -> BrokerExportPreview:
     df = pd.read_csv(file_obj)
     columns = [str(column) for column in df.columns]
-    simple_mapping = _to_simple_mapping(mapping, columns)
+    simple_mapping = _to_simple_mapping(mapping, columns, broker=broker)
     missing_required = [
         field for field in BROKER_EXPORT_REQUIRED_FIELDS if field not in simple_mapping
     ]
+    resolved_broker_preset = _resolve_broker_export_preset_key(broker)
+    hints = broker_export_mapping_hints(columns, broker=broker)
     sample_rows = df.head(max_rows).fillna("").to_dict(orient="records")
     return BrokerExportPreview(
         columns=columns,
@@ -743,6 +989,8 @@ def load_broker_export_csv_preview(
         mapping=simple_mapping,
         missing_required=missing_required,
         signature=file_signature(columns),
+        hints=hints,
+        resolved_broker_preset=resolved_broker_preset,
     )
 
 
@@ -750,9 +998,15 @@ def load_broker_tax_csv_preview(
     file_obj: str | Path | BinaryIO,
     mapping: dict[str, Any] | None = None,
     *,
+    broker: str = "generic",
     max_rows: int = 200,
 ) -> BrokerExportPreview:
-    return load_broker_export_csv_preview(file_obj=file_obj, mapping=mapping, max_rows=max_rows)
+    return load_broker_export_csv_preview(
+        file_obj=file_obj,
+        mapping=mapping,
+        broker=broker,
+        max_rows=max_rows,
+    )
 
 
 def normalize_broker_export_records(
@@ -770,7 +1024,7 @@ def normalize_broker_export_records(
             return realized_rows, realized_issues
 
     if mapping is None:
-        mapping = infer_broker_export_column_map(columns)
+        mapping = infer_broker_export_column_map(columns, broker=broker)
 
     normalized_mapping, mapping_errors = validate_broker_export_mapping(
         mapping,
@@ -1002,6 +1256,7 @@ __all__ = [
     "BrokerExportPreview",
     "ReconciliationImportResult",
     "broker_export_totals",
+    "broker_export_mapping_hints",
     "import_broker_reconciliation_inputs",
     "import_reconciliation_inputs",
     "infer_broker_export_column_map",
@@ -1013,6 +1268,7 @@ __all__ = [
     "normalize_broker_tax_csv",
     "normalize_broker_tax_records",
     "normalize_term",
+    "suggest_broker_export_column_candidates",
     "summarize_broker_totals",
     "validate_broker_export_mapping",
     "validate_broker_tax_mapping",
