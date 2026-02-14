@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -48,6 +49,36 @@ def test_nav_display_label_prefers_icon_mapping():
 
     fallback = streamlit_app._nav_display_label("Unknown")
     assert fallback == "• Unknown"
+
+
+def test_scope_display_label_and_step_caption():
+    from portfolio_assistant.ui.streamlit import app as streamlit_app
+
+    account = SimpleNamespace(
+        id="acc-1",
+        broker="Webull",
+        account_label="Taxable QA",
+        account_type=SimpleNamespace(value="TAXABLE"),
+    )
+    accounts = [account]
+
+    assert (
+        streamlit_app._scope_display_label(accounts, None)
+        == "All accounts (consolidated)"
+    )
+    assert (
+        streamlit_app._scope_display_label(accounts, "acc-1")
+        == "Taxable QA · Webull · TAXABLE"
+    )
+    assert streamlit_app._scope_display_label(accounts, "missing") == "Unknown account scope"
+
+    caption = streamlit_app._scope_step_caption(
+        idx=2,
+        total_steps=8,
+        accounts=accounts,
+        account_filter_id="acc-1",
+    )
+    assert caption == "Workflow step 2/8. Account scope: Taxable QA · Webull · TAXABLE."
 
 
 def test_instrument_type_decision_context_variants():

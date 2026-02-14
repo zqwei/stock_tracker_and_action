@@ -112,7 +112,7 @@ NAV_CONTENT_HINTS = {
     "Accounts": "Create or manage brokerage accounts before importing data.",
     "Import Trades": "Normalize executions and verify instrument mapping before import.",
     "Import Cash": "Map and tag deposits/withdrawals for contribution tracking.",
-    "Overview": "Review consolidated P&L, contributions, and position snapshot.",
+    "Overview": "Review consolidated P&L, contributions, and open-position snapshot.",
     "Benchmarks": "Compare portfolio returns against benchmark windows.",
     "Calendar": "Inspect realized P&L over time for volatility and event context.",
     "Wash Sale Risk": "Review informational cross-account replacement risk flags.",
@@ -284,6 +284,28 @@ def _account_lookup(accounts: list[Account]) -> dict[str, Account]:
     return {account.id: account for account in accounts}
 
 
+def _scope_display_label(accounts: list[Account], account_filter_id: str | None) -> str:
+    if account_filter_id is None:
+        return "All accounts (consolidated)"
+    account = _account_lookup(accounts).get(account_filter_id)
+    if account is None:
+        return "Unknown account scope"
+    return (
+        f"{account.account_label} · {account.broker} · {account.account_type.value}"
+    )
+
+
+def _scope_step_caption(
+    *,
+    idx: int,
+    total_steps: int,
+    accounts: list[Account],
+    account_filter_id: str | None,
+) -> str:
+    scope = _scope_display_label(accounts, account_filter_id)
+    return f"Workflow step {idx}/{total_steps}. Account scope: {scope}."
+
+
 def _set_nav_page(page: str) -> None:
     st.session_state["pending_nav_item"] = page
     st.rerun()
@@ -299,7 +321,6 @@ def _render_sidebar(accounts: list[Account], nav_items: list[str]) -> tuple[str,
     ):
         st.session_state["nav_item"] = nav_items[0]
 
-    account_by_id = _account_lookup(accounts)
     account_options: list[str | None] = [None] + [account.id for account in accounts]
     filter_state_key = "global_account_filter_id"
     current_filter = st.session_state.get(filter_state_key)
@@ -310,7 +331,7 @@ def _render_sidebar(accounts: list[Account], nav_items: list[str]) -> tuple[str,
         st.title("Portfolio Assistant")
         render_theme_selector()
         st.caption("Financial radar workflow for imports, analytics, and risk checks.")
-        st.markdown("**Workflow Navigation**")
+        st.markdown("**Radar Navigation**")
         nav = st.radio(
             "Workflow navigation",
             nav_items,
@@ -322,14 +343,10 @@ def _render_sidebar(accounts: list[Account], nav_items: list[str]) -> tuple[str,
         account_filter_id = st.selectbox(
             "Global account scope",
             options=account_options,
-            format_func=lambda account_id: (
-                "All accounts (consolidated)"
-                if account_id is None
-                else _account_label(account_by_id[account_id])
-            ),
+            format_func=lambda account_id: _scope_display_label(accounts, account_id),
             key=filter_state_key,
         )
-        st.caption("This scope is shared across all workflow pages.")
+        st.caption("Shared across all workflow pages and exports.")
 
     return nav, account_filter_id
 
@@ -345,17 +362,14 @@ def _render_flow_header(
     st.markdown(f"**{_nav_display_label(nav)}**")
     st.caption(_nav_content_hint(nav))
     st.progress(progress)
-
-    if account_filter_id is None:
-        st.caption(f"Workflow step {idx + 1}/{len(nav_items)}. Account scope: all accounts.")
-    else:
-        account = _account_lookup(accounts).get(account_filter_id)
-        if account is not None:
-            st.caption(
-                "Workflow step "
-                f"{idx + 1}/{len(nav_items)}. "
-                f"Account scope: {_account_label(account)}."
-            )
+    st.caption(
+        _scope_step_caption(
+            idx=idx + 1,
+            total_steps=len(nav_items),
+            accounts=accounts,
+            account_filter_id=account_filter_id,
+        )
+    )
 
     col_prev, col_next = st.columns(2)
     if col_prev.button(
@@ -415,7 +429,10 @@ def _select_import_account(
     default_account = account_by_id.get(account_filter_id) if account_filter_id else None
 
     if default_account is not None:
-        st.caption(f"Global account preselected: {_account_label(default_account)}")
+        st.caption(
+            "Global account scope preselected: "
+            f"{_scope_display_label(accounts, default_account.id)}"
+        )
         use_global = st.checkbox(
             "Use global account for this import",
             value=True,
@@ -819,6 +836,9 @@ def _render_import_trades(
         instrument_type_column=instrument_type_column,
         instrument_values_clear=instrument_values_clear,
     )
+    st.caption(
+        "This decision only affects rows with missing or unclear instrument type values."
+    )
     if needs_type_decision:
         st.markdown("**Instrument Type Decision**")
         st.info(type_decision_message)
@@ -841,6 +861,7 @@ def _render_import_trades(
             st.success(f"Decision selected: use `{default_choice.upper()}` for unclear rows.")
     else:
         st.success(type_decision_message)
+        st.caption("Decision not required: mapped Instrument Type values will be used as-is.")
 
     if default_choice == "Stock":
         default_instrument_type = "STOCK"
@@ -894,7 +915,7 @@ def _render_import_trades(
     readiness_steps = [
         ("Trade CSV uploaded", True),
         ("Required mappings complete", not missing),
-        ("Instrument-type decision reviewed", type_decision_ready),
+        ("Instrument type decision reviewed", type_decision_ready),
         ("Normalized rows available", valid_count > 0),
     ]
     _render_readiness_panel(
