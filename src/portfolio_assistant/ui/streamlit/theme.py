@@ -219,6 +219,7 @@ code, pre, kbd {
 
 [data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"] {
   margin: 0;
+  min-height: 2.3rem;
 }
 
 [data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"] > div:first-child {
@@ -264,6 +265,16 @@ code, pre, kbd {
 
 [data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
   color: var(--pa-text_strong);
+}
+
+[data-testid="stSidebar"] div[data-baseweb="select"] > div {
+  border-radius: 14px !important;
+  min-height: 2.45rem;
+}
+
+[data-testid="stSidebar"] div[data-baseweb="select"] [role="combobox"] {
+  font-weight: 600 !important;
+  letter-spacing: 0.005em;
 }
 
 [data-testid="stMetric"],
@@ -459,6 +470,16 @@ BRIGHT_THEME_CSS = """
 
 [data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
   color: #092f52 !important;
+}
+
+[data-testid="stSidebar"] div[data-baseweb="select"] > div {
+  background: #ffffff !important;
+  border-color: #7aa3d0 !important;
+}
+
+[data-testid="stSidebar"] div[data-baseweb="select"] [role="combobox"] {
+  color: #0d3659 !important;
+  font-weight: 700 !important;
 }
 
 [data-testid="stSidebar"] [data-testid="stSidebarNav"] a:hover {
